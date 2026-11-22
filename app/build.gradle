@@ -10,8 +10,8 @@ android {
         applicationId 'com.milauncher.tv'
         minSdk 21
         targetSdk 28
-        versionCode 2
-        versionName '2.0'
+        versionCode 3
+        versionName '3.0'
     }
 
     // Firma fija: así cada versión nueva se instala encima de la anterior sin desinstalar.
@@ -26,8 +26,14 @@ android {
     }
 
     buildTypes {
+        // Este build ("debug" solo por el nombre del comando) sale optimizado:
+        // código reducido con R8, sin modo depuración y con la firma fija.
         debug {
             signingConfig signingConfigs.fixed
+            debuggable false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
         }
     }
 
