@@ -1,35 +1,41 @@
 package com.milauncher.tv;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
-import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.net.ConnectivityManager;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
+import android.net.NetworkRequest;
+import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.TextPaint;
 import android.text.TextUtils;
-import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.SoundEffectConstants;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.Window;
+import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
@@ -38,28 +44,24 @@ import android.widget.TextClock;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.io.File;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Mi Launcher v3 (estilo Google TV, pensado para poca RAM)
- * - Cada app es UNA sola vista dibujada a mano (en vez de 4): menos memoria y menos trabajo por cuadro.
- * - Íconos reescalados al tamaño exacto, cargados en segundo plano y cacheados.
- * - Tamaño de íconos y zoom al enfocar configurables.
- * - Nada se recalcula al volver al launcher si no cambió nada.
+ * Mi Launcher v4 (estilo Google TV, liviano)
+ * - Pestañas arriba (Inicio + categorías), fila "Recientes", tarjetas banner 16:9.
+ * - Cada tarjeta es UNA sola vista dibujada a mano: borde blanco al enfocar, nombre solo en la enfocada.
+ * - Color suave de cada tarjeta y tinte del fondo tomados del color del ícono (sin imágenes extra).
+ * - Sonido de navegación del sistema en todas las filas y botones.
  */
 public class MainActivity extends Activity {
 
@@ -67,9 +69,14 @@ public class MainActivity extends Activity {
     private static final String KEY_CATS = "cats";      // líneas "id|nombre"
     private static final String KEY_ASSIGN = "assign";  // líneas "paquete|id"
     private static final String KEY_ORDER = "order";    // líneas "paquete"
-    private static final String KEY_BG = "bg";          // "p0".."p7" o "img"
+    private static final String KEY_RECENT = "recent";  // líneas "paquete" (más reciente primero)
+    private static final String KEY_BG = "bg";          // "p0".."p7"
     private static final String KEY_SIZE = "size";      // 0 chico, 1 mediano, 2 grande
-    private static final String KEY_ZOOM = "zoom";      // boolean
+    private static final String KEY_DYN = "dyn";        // fondo que se tiñe con la app enfocada
+
+    private static final int MAX_RECENT = 5;
+    private static final int TEXT_PRIMARY = 0xFFFFFFFF;
+    private static final int TEXT_SECONDARY = 0xB3FFFFFF;
 
     private static final String[] BG_NAMES = {
             "Azul noche", "Violeta", "Verde bosque", "Rojo vino", "Gris carbón",
@@ -86,7 +93,7 @@ public class MainActivity extends Activity {
     private static final String[] PRESET_NAMES = {
             "Streaming", "Juegos", "Música", "Herramientas", "Favoritas", "Otros"};
     private static final String[] SIZE_NAMES = {"Chico", "Mediano", "Grande"};
-    private static final int[] ICON_DP = {36, 48, 60};
+    private static final int[] TILE_DP = {128, 160, 192}; // ancho; el alto sale en 16:9
 
     private interface StringCb { void on(String s); }
     private interface CatCb { void on(Cat c); }
@@ -105,36 +112,48 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
     private LinearLayout root;
+    private LinearLayout tabsRow;
     private LinearLayout rowsContainer;
     private ScrollView vscroll;
-    private TextView dateView;
-    private final SimpleDateFormat dateFmt = new SimpleDateFormat("EEEE d 'de' MMMM", Locale.getDefault());
+    private FocusTextView wifiBtn;
 
     private final List<Cat> cats = new ArrayList<>();
     private final Map<String, String> assign = new HashMap<>();
     private List<String> order = new ArrayList<>();
+    private List<String> recent = new ArrayList<>();
     private final Map<String, String> labelCache = new HashMap<>();
 
     private final Map<String, Bitmap> iconCache = new HashMap<>();
-    private final Map<String, TileView> tileViews = new HashMap<>();
+    private final Map<String, Integer> tintCache = new HashMap<>();
+    private final List<TileView> allTiles = new ArrayList<>();
+    private final Map<String, View> tabViews = new HashMap<>();
     private final Set<String> loading = new HashSet<>();
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
-    // Pinturas compartidas por todas las tarjetas (una sola instancia de cada una).
+    // Pinturas compartidas por todas las tarjetas.
     private final Paint tileFill = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint tileRing = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint tileText = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint iconPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
     private int sizeIdx = 1;
-    private boolean zoomOn = true;
+    private boolean dynBg = true;
     private int iconPx, tileW, tileH, labelH, cornerPx, ringPx;
 
-    private Drawable.ConstantState pillBgState;
-    private Bitmap bgBitmap;
+    private Drawable.ConstantState pillState;
+    private Drawable.ConstantState rowState;
+    private GradientDrawable bgGradient;
+    private int bgIdx = 0;
+    private int lastTint = 0;
+
+    private String currentTabId = "";
     private String signature = "";
     private String pendingFocus = null;
+    private String pendingTab = null;
     private View firstCardRef = null;
+
+    private ConnectivityManager cm;
+    private ConnectivityManager.NetworkCallback netCb;
 
     // ---------- Ciclo de vida ----------
 
@@ -142,10 +161,12 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        pillBgState = pillBackground().getConstantState();
-        tileText.setColor(Color.WHITE);
+        pillState = selectorBackground(40).getConstantState();
+        rowState = selectorBackground(12).getConstantState();
+        Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+        tileText.setColor(TEXT_PRIMARY);
         tileText.setTextAlign(Paint.Align.CENTER);
-        tileText.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        tileText.setTypeface(medium);
         tileRing.setStyle(Paint.Style.STROKE);
         tileRing.setColor(Color.WHITE);
         applyMetrics();
@@ -156,15 +177,26 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
-        dateView.setText(capitalize(dateFmt.format(new Date())));
+        registerNetwork();
         rebuild(false);
+    }
+
+    @Override
+    protected void onPause() {
+        unregisterNetwork();
+        super.onPause();
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
-        // Al apretar Home: volver arriba y enfocar la primera app.
-        if (firstCardRef != null) firstCardRef.requestFocus();
+        // Al apretar Home: volver a "Inicio", arriba y con foco en la primera app.
+        if (currentTabId.length() > 0) {
+            currentTabId = "";
+            rebuild(true);
+        } else if (firstCardRef != null) {
+            firstCardRef.requestFocus();
+        }
         vscroll.scrollTo(0, 0);
     }
 
@@ -176,7 +208,7 @@ public class MainActivity extends Activity {
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_MENU) {
-            showMainMenu();
+            showSettingsMenu();
             return true;
         }
         return super.onKeyDown(keyCode, event);
@@ -188,87 +220,123 @@ public class MainActivity extends Activity {
         super.onDestroy();
     }
 
-    // ---------- Medidas según el tamaño elegido ----------
+    // ---------- Medidas ----------
 
     private void applyMetrics() {
         sizeIdx = Math.max(0, Math.min(2, prefs.getInt(KEY_SIZE, 1)));
-        zoomOn = prefs.getBoolean(KEY_ZOOM, true);
-        int iconDp = ICON_DP[sizeIdx];
-        iconPx = dp(iconDp);
-        tileH = dp((int) (iconDp * 1.6f));
-        tileW = (int) (tileH * 1.35f);
+        dynBg = prefs.getBoolean(KEY_DYN, true);
+        tileW = dp(TILE_DP[sizeIdx]);
+        tileH = tileW * 9 / 16;
+        iconPx = (int) (tileH * 0.58f);
         labelH = dp(24);
-        cornerPx = dp(14);
-        ringPx = Math.max(2, dp(3));
+        cornerPx = dp(12);
+        ringPx = Math.max(2, dp(2));
         tileRing.setStrokeWidth(ringPx);
-        tileText.setTextSize(12 * getResources().getDisplayMetrics().scaledDensity);
+        tileText.setTextSize(13 * getResources().getDisplayMetrics().scaledDensity);
     }
 
     // ---------- Interfaz base ----------
 
     private View buildRoot() {
+        Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(56), dp(30), dp(56), dp(18));
-        root.setClipChildren(false);
+        root.setPadding(dp(56), dp(24), dp(56), dp(16));
 
-        // Barra superior: reloj a la izquierda, "Personalizar" a la derecha.
+        // Barra superior: pestañas a la izquierda; Wi-Fi, Ajustes y reloj a la derecha.
         LinearLayout top = new LinearLayout(this);
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
 
-        LinearLayout clock = new LinearLayout(this);
-        clock.setOrientation(LinearLayout.VERTICAL);
+        tabsRow = new LinearLayout(this);
+        tabsRow.setOrientation(LinearLayout.HORIZONTAL);
+        top.addView(tabsRow, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        wifiBtn = new FocusTextView(this);
+        wifiBtn.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_wifi, 0, 0, 0);
+        wifiBtn.setPadding(dp(12), dp(8), dp(12), dp(8));
+        wifiBtn.setBackground(pillState.newDrawable());
+        wifiBtn.setOnClickListener(v -> openWifiSettings());
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        wlp.rightMargin = dp(8);
+        top.addView(wifiBtn, wlp);
+
+        FocusTextView settings = new FocusTextView(this);
+        settings.setText("Ajustes");
+        settings.setTextColor(TEXT_PRIMARY);
+        settings.setTextSize(14);
+        settings.setTypeface(medium);
+        settings.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_gear, 0, 0, 0);
+        settings.setCompoundDrawablePadding(dp(8));
+        settings.setGravity(Gravity.CENTER_VERTICAL);
+        settings.setPadding(dp(16), dp(8), dp(18), dp(8));
+        settings.setBackground(pillState.newDrawable());
+        settings.setOnClickListener(v -> showSettingsMenu());
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.rightMargin = dp(16);
+        top.addView(settings, slp);
+
         TextClock time = new TextClock(this);
         time.setFormat24Hour("HH:mm");
         time.setFormat12Hour("HH:mm");
-        time.setTextColor(Color.WHITE);
-        time.setTextSize(44);
-        time.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-        clock.addView(time);
-        dateView = new TextView(this);
-        dateView.setTextColor(0xFFA9B4CC);
-        dateView.setTextSize(16);
-        clock.addView(dateView);
-        top.addView(clock, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        time.setTextColor(TEXT_PRIMARY);
+        time.setTextSize(20);
+        time.setTypeface(medium);
+        top.addView(time);
 
-        TextView pill = new TextView(this);
-        pill.setText("Personalizar");
-        pill.setTextColor(Color.WHITE);
-        pill.setTextSize(14);
-        pill.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        pill.setPadding(dp(22), dp(9), dp(22), dp(9));
-        pill.setFocusable(true);
-        pill.setClickable(true);
-        pill.setBackground(pillBgState.newDrawable());
-        pill.setOnClickListener(v -> showMainMenu());
-        top.addView(pill, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(top, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // Zona de filas (scroll vertical solo si hay muchas categorías).
+        // Zona de filas (scroll vertical solo si hay muchas).
         vscroll = new ScrollView(this);
         vscroll.setVerticalScrollBarEnabled(false);
         vscroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         vscroll.setClipToPadding(false);
-        vscroll.setClipChildren(false);
-        vscroll.setPadding(0, dp(14), 0, dp(14));
+        vscroll.setPadding(0, dp(20), 0, dp(12));
         rowsContainer = new LinearLayout(this);
         rowsContainer.setOrientation(LinearLayout.VERTICAL);
-        rowsContainer.setClipChildren(false);
         vscroll.addView(rowsContainer, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         root.addView(vscroll, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        TextView hint = new TextView(this);
-        hint.setText("OK: abrir   \u00B7   Mantener OK: mover o cambiar de categoría");
-        hint.setTextColor(0xFF5E6A87);
-        hint.setTextSize(12);
-        root.addView(hint);
-
         return root;
+    }
+
+    // ---------- Pestañas ----------
+
+    private void buildTabs() {
+        tabsRow.removeAllViews();
+        tabViews.clear();
+        addTab("Inicio", "");
+        for (Cat c : cats) addTab(c.name, c.id);
+    }
+
+    private void addTab(String label, final String id) {
+        boolean active = id.equals(currentTabId);
+        FocusTextView t = new FocusTextView(this);
+        t.setText(label);
+        t.setTextSize(15);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setTextColor(active ? TEXT_PRIMARY : TEXT_SECONDARY);
+        t.setSelected(active);
+        t.setPadding(dp(18), dp(8), dp(18), dp(8));
+        t.setBackground(pillState.newDrawable());
+        t.setTag("tab:" + id);
+        t.setOnClickListener(v -> {
+            if (!id.equals(currentTabId)) {
+                currentTabId = id;
+                pendingTab = id;
+                rebuild(true);
+            }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.rightMargin = dp(6);
+        tabsRow.addView(t, lp);
+        tabViews.put(id, t);
     }
 
     // ---------- Construcción de filas ----------
@@ -277,14 +345,19 @@ public class MainActivity extends Activity {
         loadState();
         Map<String, Entry> inst = queryInstalled();
         List<Entry> all = orderedEntries(inst);
+        List<Entry> recents = new ArrayList<>();
+        for (String p : recent) if (inst.containsKey(p)) recents.add(inst.get(p));
+
+        boolean tabOk = currentTabId.length() == 0;
+        for (Cat c : cats) if (c.id.equals(currentTabId)) tabOk = true;
+        if (!tabOk) currentTabId = "";
 
         String sig = join(order) + "#" + prefs.getString(KEY_CATS, "") + "#"
                 + prefs.getString(KEY_ASSIGN, "") + "#" + prefs.getInt(KEY_SIZE, 1)
-                + "#" + prefs.getBoolean(KEY_ZOOM, true);
+                + "#" + join(recent) + "#" + currentTabId;
         if (!force && sig.equals(signature) && rowsContainer.getChildCount() > 0) return;
         signature = sig;
 
-        // Si cambió el tamaño, los íconos cacheados ya no sirven.
         int oldIconPx = iconPx;
         applyMetrics();
         if (iconPx != oldIconPx) {
@@ -292,56 +365,76 @@ public class MainActivity extends Activity {
             loading.clear();
         }
 
-        // Recordar qué app tenía el foco para devolvérselo.
+        // Recordar dónde estaba el foco.
         String keepFocus = pendingFocus;
+        String keepTab = pendingTab;
         pendingFocus = null;
-        if (keepFocus == null) {
-            View f = getCurrentFocus();
-            if (f instanceof TileView) keepFocus = ((TileView) f).pkg;
+        pendingTab = null;
+        View f = getCurrentFocus();
+        if (keepFocus == null && keepTab == null && f != null) {
+            if (f instanceof TileView && !((TileView) f).recent) {
+                keepFocus = ((TileView) f).pkg;
+            } else if (f.getTag() instanceof String && ((String) f.getTag()).startsWith("tab:")) {
+                keepTab = ((String) f.getTag()).substring(4);
+            }
         }
 
+        buildTabs();
         rowsContainer.removeAllViews();
-        tileViews.clear();
+        allTiles.clear();
         firstCardRef = null;
 
+        boolean home = currentTabId.length() == 0;
         Set<String> catIds = new HashSet<>();
         for (Cat c : cats) catIds.add(c.id);
 
+        if (home && !recents.isEmpty()) addSection("Recientes", recents, true);
         for (Cat c : cats) {
+            if (!home && !c.id.equals(currentTabId)) continue;
             List<Entry> items = new ArrayList<>();
             for (Entry e : all) if (c.id.equals(assign.get(e.pkg))) items.add(e);
-            addSection(c.name, items);
+            addSection(c.name, items, false);
         }
-        List<Entry> rest = new ArrayList<>();
-        for (Entry e : all) {
-            String id = assign.get(e.pkg);
-            if (id == null || !catIds.contains(id)) rest.add(e);
+        if (home) {
+            List<Entry> rest = new ArrayList<>();
+            for (Entry e : all) {
+                String id = assign.get(e.pkg);
+                if (id == null || !catIds.contains(id)) rest.add(e);
+            }
+            if (!rest.isEmpty() || cats.isEmpty()) addSection("Apps", rest, false);
         }
-        if (!rest.isEmpty() || cats.isEmpty()) addSection("Apps", rest);
 
         View target = null;
-        if (keepFocus != null) target = tileViews.get(keepFocus);
+        if (keepTab != null) target = tabViews.get(keepTab);
+        if (target == null && keepFocus != null) {
+            for (TileView t : allTiles) {
+                if (!t.recent && t.pkg.equals(keepFocus)) {
+                    target = t;
+                    break;
+                }
+            }
+        }
         if (target == null) target = firstCardRef;
+        if (target == null) target = tabViews.get(currentTabId);
         if (target != null) target.requestFocus();
     }
 
-    private void addSection(String title, List<Entry> items) {
+    private void addSection(String title, List<Entry> items, boolean isRecent) {
         LinearLayout section = new LinearLayout(this);
         section.setOrientation(LinearLayout.VERTICAL);
-        section.setClipChildren(false);
 
         TextView t = new TextView(this);
         t.setText(title);
-        t.setTextColor(0xFFE3E8F6);
-        t.setTextSize(16);
+        t.setTextColor(TEXT_SECONDARY);
+        t.setTextSize(15);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setPadding(dp(8), dp(8), 0, dp(2));
+        t.setPadding(dp(8), dp(4), 0, dp(2));
         section.addView(t);
 
         if (items.isEmpty()) {
             TextView empty = new TextView(this);
             empty.setText("Vacía. Mantené OK sobre una app y elegí «Mover a otra categoría».");
-            empty.setTextColor(0xFF6B7794);
+            empty.setTextColor(TEXT_SECONDARY);
             empty.setTextSize(13);
             empty.setPadding(dp(8), dp(6), 0, dp(16));
             section.addView(empty);
@@ -350,13 +443,11 @@ public class MainActivity extends Activity {
             hs.setHorizontalScrollBarEnabled(false);
             hs.setOverScrollMode(View.OVER_SCROLL_NEVER);
             hs.setClipToPadding(false);
-            hs.setClipChildren(false);
-            hs.setPadding(dp(8), dp(10), dp(8), dp(4));
+            hs.setPadding(dp(8), dp(6), dp(8), dp(6));
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setClipChildren(false);
             for (int i = 0; i < items.size(); i++) {
-                TileView tile = makeTile(items.get(i), items, i);
+                TileView tile = makeTile(items.get(i), items, i, isRecent);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 lp.rightMargin = dp(14);
@@ -371,35 +462,38 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    private TileView makeTile(final Entry e, final List<Entry> rowItems, final int index) {
-        TileView v = new TileView(e);
-        tileViews.put(e.pkg, v);
+    private TileView makeTile(final Entry e, final List<Entry> rowItems, final int index, boolean isRecent) {
+        TileView v = new TileView(e, isRecent);
+        allTiles.add(v);
         if (firstCardRef == null) firstCardRef = v;
-        Bitmap cached = iconCache.get(e.pkg);
-        if (cached != null) {
-            v.icon = cached;
-        } else if (loading.add(e.pkg)) {
-            loadIconAsync(e);
-        }
-        v.setOnClickListener(x -> launch(e.cn));
+        if (v.icon == null && loading.add(e.pkg)) loadIconAsync(e);
+        final boolean rec = isRecent;
+        v.setOnClickListener(x -> launch(e));
         v.setOnLongClickListener(x -> {
-            showAppMenu(e, rowItems, index);
+            if (rec) showRecentMenu(e);
+            else showAppMenu(e, rowItems, index);
             return true;
         });
         return v;
     }
 
-    /** Una tarjeta = una sola vista dibujada a mano. */
+    /** Una tarjeta = una sola vista dibujada a mano (banner 16:9). */
     private class TileView extends View {
         final String pkg;
         final String shownLabel;
+        final boolean recent;
         Bitmap icon;
+        int tint;
         private final RectF rect = new RectF();
 
-        TileView(Entry e) {
+        TileView(Entry e, boolean isRecent) {
             super(MainActivity.this);
             pkg = e.pkg;
-            shownLabel = TextUtils.ellipsize(e.label, tileText, tileW - dp(4),
+            recent = isRecent;
+            icon = iconCache.get(e.pkg);
+            Integer t = tintCache.get(e.pkg);
+            tint = t != null ? t : 0;
+            shownLabel = TextUtils.ellipsize(e.label, tileText, tileW - dp(8),
                     TextUtils.TruncateAt.END).toString();
             setFocusable(true);
             setClickable(true);
@@ -413,18 +507,17 @@ public class MainActivity extends Activity {
         @Override
         protected void onDraw(Canvas c) {
             boolean f = isFocused();
+            int base = tint != 0 ? tint : 0xFF3B4663;
+            tileFill.setColor(((f ? 0xB0 : 0x70) << 24) | (base & 0x00FFFFFF));
             rect.set(0, 0, tileW, tileH);
-            tileFill.setColor(f ? 0x38FFFFFF : 0x1AFFFFFF);
             c.drawRoundRect(rect, cornerPx, cornerPx, tileFill);
-            if (f) {
-                float h = ringPx / 2f;
-                rect.set(h, h, tileW - h, tileH - h);
-                c.drawRoundRect(rect, cornerPx, cornerPx, tileRing);
-            }
             if (icon != null) {
                 c.drawBitmap(icon, (tileW - iconPx) / 2f, (tileH - iconPx) / 2f, iconPaint);
             }
             if (f) {
+                float h = ringPx / 2f;
+                rect.set(h, h, tileW - h, tileH - h);
+                c.drawRoundRect(rect, cornerPx, cornerPx, tileRing);
                 c.drawText(shownLabel, tileW / 2f, tileH + labelH * 0.72f, tileText);
             }
         }
@@ -432,15 +525,45 @@ public class MainActivity extends Activity {
         @Override
         protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
             super.onFocusChanged(gain, direction, previouslyFocusedRect);
+            if (gain) {
+                playNav(this, direction);
+                tintBackground(tint);
+            }
             invalidate();
-            if (zoomOn) {
-                float s = gain ? 1.07f : 1f;
-                animate().scaleX(s).scaleY(s).setDuration(100).start();
+        }
+    }
+
+    /** Botón/pestaña de texto con el mismo sonido de navegación que las tarjetas. */
+    private class FocusTextView extends TextView {
+        FocusTextView(Context c) {
+            super(c);
+            setFocusable(true);
+            setClickable(true);
+        }
+
+        @Override
+        protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
+            super.onFocusChanged(gain, direction, previouslyFocusedRect);
+            if (gain) {
+                playNav(this, direction);
+                tintBackground(0);
             }
         }
     }
 
-    // ---------- Íconos ----------
+    private void playNav(View v, int direction) {
+        int fx;
+        switch (direction) {
+            case View.FOCUS_UP: fx = SoundEffectConstants.NAVIGATION_UP; break;
+            case View.FOCUS_DOWN: fx = SoundEffectConstants.NAVIGATION_DOWN; break;
+            case View.FOCUS_LEFT: fx = SoundEffectConstants.NAVIGATION_LEFT; break;
+            case View.FOCUS_RIGHT: fx = SoundEffectConstants.NAVIGATION_RIGHT; break;
+            default: return;
+        }
+        v.playSoundEffect(fx);
+    }
+
+    // ---------- Íconos y color ----------
 
     private void loadIconAsync(final Entry e) {
         final int size = iconPx;
@@ -452,19 +575,72 @@ public class MainActivity extends Activity {
                 Canvas cv = new Canvas(b);
                 d.setBounds(0, 0, size, size);
                 d.draw(cv);
+                final int tint = averageColor(b);
                 runOnUiThread(() -> {
                     if (size != iconPx) return; // cambió el tamaño mientras cargaba
                     iconCache.put(e.pkg, b);
-                    TileView v = tileViews.get(e.pkg);
-                    if (v != null) {
-                        v.icon = b;
-                        v.invalidate();
+                    tintCache.put(e.pkg, tint);
+                    for (TileView t : allTiles) {
+                        if (t.pkg.equals(e.pkg)) {
+                            t.icon = b;
+                            t.tint = tint;
+                            t.invalidate();
+                            if (t.isFocused()) {
+                                lastTint = -1;
+                                tintBackground(tint);
+                            }
+                        }
                     }
                 });
             } catch (Throwable ignored) {
                 // Si un ícono falla, la tarjeta queda sin ícono pero con nombre.
             }
         });
+    }
+
+    /** Color promedio del ícono (ignora lo transparente), suavizado hacia un azul oscuro. */
+    private int averageColor(Bitmap b) {
+        Bitmap s = Bitmap.createScaledBitmap(b, 8, 8, true);
+        int[] px = new int[64];
+        s.getPixels(px, 0, 8, 0, 0, 8, 8);
+        if (s != b) s.recycle();
+        long r = 0, g = 0, bl = 0;
+        int n = 0;
+        for (int p : px) {
+            if ((p >>> 24) < 160) continue;
+            r += (p >> 16) & 255;
+            g += (p >> 8) & 255;
+            bl += p & 255;
+            n++;
+        }
+        if (n == 0) return 0;
+        int avg = 0xFF000000 | ((int) (r / n) << 16) | ((int) (g / n) << 8) | (int) (bl / n);
+        return blend(avg, 0xFF222B42, 0.25f);
+    }
+
+    private int blend(int a, int b, float t) {
+        int r = (int) (((a >> 16) & 255) * (1 - t) + ((b >> 16) & 255) * t);
+        int g = (int) (((a >> 8) & 255) * (1 - t) + ((b >> 8) & 255) * t);
+        int bl = (int) ((a & 255) * (1 - t) + (b & 255) * t);
+        return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
+    /** Tiñe suavemente el degradado de fondo con el color de la app enfocada (0 = sin tinte). */
+    private void tintBackground(int color) {
+        if (bgGradient == null) return;
+        if (!dynBg) color = 0;
+        if (color == lastTint) return;
+        lastTint = color;
+        int[] base = BG_COLORS[bgIdx];
+        int[] c = new int[2];
+        if (color == 0) {
+            c[0] = base[0];
+            c[1] = base[1];
+        } else {
+            c[0] = blend(base[0], color, 0.14f);
+            c[1] = blend(base[1], color, 0.30f);
+        }
+        bgGradient.setColors(c);
     }
 
     // ---------- Datos ----------
@@ -481,6 +657,7 @@ public class MainActivity extends Activity {
             if (i > 0) assign.put(line.substring(0, i), line.substring(i + 1));
         }
         order = readLines(KEY_ORDER);
+        recent = readLines(KEY_RECENT);
     }
 
     private List<String> readLines(String key) {
@@ -513,6 +690,10 @@ public class MainActivity extends Activity {
 
     private void saveOrder() {
         prefs.edit().putString(KEY_ORDER, join(order)).apply();
+    }
+
+    private void saveRecent() {
+        prefs.edit().putString(KEY_RECENT, join(recent)).apply();
     }
 
     private Map<String, Entry> queryInstalled() {
@@ -569,24 +750,69 @@ public class MainActivity extends Activity {
 
     // ---------- Acciones sobre apps ----------
 
-    private void launch(ComponentName cn) {
+    private void launch(Entry e) {
         try {
             Intent i = new Intent(Intent.ACTION_MAIN);
-            i.setComponent(cn);
+            i.setComponent(e.cn);
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
             startActivity(i);
+            recent.remove(e.pkg);
+            recent.add(0, e.pkg);
+            while (recent.size() > MAX_RECENT) recent.remove(recent.size() - 1);
+            saveRecent();
         } catch (Exception ex) {
             toast("No se pudo abrir la app");
         }
     }
 
     private void showAppMenu(final Entry e, final List<Entry> rowItems, final int index) {
-        String[] items = {"Mover a la izquierda", "Mover a la derecha", "Mover a otra categoría"};
-        listDialog(e.label, items, (d, which) -> {
-            if (which == 0) moveInRow(e, rowItems, index, -1);
-            else if (which == 1) moveInRow(e, rowItems, index, 1);
-            else chooseCategoryFor(e);
+        String[] items = {"Mover a otra categoría", "Mover a la derecha", "Mover a la izquierda",
+                "Información de la app", "Desinstalar"};
+        showMenu(e.label, items, (d, which) -> {
+            switch (which) {
+                case 0: chooseCategoryFor(e); break;
+                case 1: moveInRow(e, rowItems, index, 1); break;
+                case 2: moveInRow(e, rowItems, index, -1); break;
+                case 3: openAppInfo(e.pkg); break;
+                default: uninstall(e.pkg);
+            }
         });
+    }
+
+    private void showRecentMenu(final Entry e) {
+        String[] items = {"Quitar de Recientes", "Información de la app", "Desinstalar"};
+        showMenu(e.label, items, (d, which) -> {
+            if (which == 0) {
+                recent.remove(e.pkg);
+                saveRecent();
+                rebuild(true);
+            } else if (which == 1) {
+                openAppInfo(e.pkg);
+            } else {
+                uninstall(e.pkg);
+            }
+        });
+    }
+
+    private void openAppInfo(String pkg) {
+        try {
+            Intent i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", pkg, null));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception ex) {
+            toast("No se pudo abrir la información");
+        }
+    }
+
+    private void uninstall(String pkg) {
+        try {
+            Intent i = new Intent(Intent.ACTION_DELETE, Uri.fromParts("package", pkg, null));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception ex) {
+            toast("No se pudo desinstalar");
+        }
     }
 
     private void moveInRow(Entry e, List<Entry> rowItems, int index, int dir) {
@@ -609,7 +835,7 @@ public class MainActivity extends Activity {
         for (Cat c : cats) names.add(c.name);
         names.add("Apps (sin categoría)");
         names.add("+ Nueva categoría…");
-        listDialog("Mover " + e.label + " a…", names.toArray(new String[0]), (d, which) -> {
+        showMenu("Mover " + e.label + " a…", names.toArray(new String[0]), (d, which) -> {
             if (which < cats.size()) {
                 assign.put(e.pkg, cats.get(which).id);
                 saveAssign();
@@ -634,16 +860,17 @@ public class MainActivity extends Activity {
         });
     }
 
-    // ---------- Menú Personalizar ----------
+    // ---------- Ajustes ----------
 
-    private void showMainMenu() {
+    private void showSettingsMenu() {
         String[] items = {
                 "Nueva categoría", "Renombrar categoría", "Subir / bajar categoría",
                 "Eliminar categoría",
-                "Tamaño de íconos: " + SIZE_NAMES[sizeIdx],
-                "Zoom al enfocar: " + (zoomOn ? "sí" : "no (más liviano)"),
-                "Fondo", "Ajustes de Android"};
-        listDialog("Personalizar", items, (d, which) -> {
+                "Tamaño de tarjetas: " + SIZE_NAMES[sizeIdx],
+                "Fondo",
+                "Fondo que cambia con la app: " + (dynBg ? "sí" : "no"),
+                "Ajustes de Android"};
+        showMenu("Ajustes", items, (d, which) -> {
             switch (which) {
                 case 0:
                     askCategoryName("Nueva categoría", "", name -> {
@@ -666,17 +893,19 @@ public class MainActivity extends Activity {
                     pickCategory("Eliminar…", this::confirmDeleteCategory);
                     break;
                 case 4:
-                    listDialog("Tamaño de íconos", SIZE_NAMES, (dd, w) -> {
+                    showMenu("Tamaño de tarjetas", SIZE_NAMES, (dd, w) -> {
                         prefs.edit().putInt(KEY_SIZE, w).apply();
                         rebuild(true);
                     });
                     break;
                 case 5:
-                    prefs.edit().putBoolean(KEY_ZOOM, !zoomOn).apply();
-                    rebuild(true);
+                    showBackgroundMenu();
                     break;
                 case 6:
-                    showBackgroundMenu();
+                    prefs.edit().putBoolean(KEY_DYN, !dynBg).apply();
+                    dynBg = !dynBg;
+                    lastTint = -1;
+                    tintBackground(0);
                     break;
                 default:
                     try {
@@ -690,6 +919,13 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void showBackgroundMenu() {
+        showMenu("Fondo", BG_NAMES, (d, which) -> {
+            prefs.edit().putString(KEY_BG, "p" + which).apply();
+            applyBackground();
+        });
+    }
+
     private void pickCategory(String title, final CatCb cb) {
         if (cats.isEmpty()) {
             toast("Todavía no hay categorías. Creá una primero.");
@@ -697,11 +933,11 @@ public class MainActivity extends Activity {
         }
         String[] names = new String[cats.size()];
         for (int i = 0; i < cats.size(); i++) names[i] = cats.get(i).name;
-        listDialog(title, names, (d, which) -> cb.on(cats.get(which)));
+        showMenu(title, names, (d, which) -> cb.on(cats.get(which)));
     }
 
     private void moveCategoryDialog(final Cat c) {
-        listDialog(c.name, new String[]{"Subir", "Bajar"}, (d, which) -> {
+        showMenu(c.name, new String[]{"Subir", "Bajar"}, (d, which) -> {
             int i = cats.indexOf(c);
             int j = which == 0 ? i - 1 : i + 1;
             if (j < 0 || j >= cats.size()) {
@@ -715,10 +951,9 @@ public class MainActivity extends Activity {
     }
 
     private void confirmDeleteCategory(final Cat c) {
-        new AlertDialog.Builder(this, AlertDialog.THEME_HOLO_DARK)
-                .setTitle("¿Eliminar «" + c.name + "»?")
-                .setMessage("Sus apps vuelven a la fila \"Apps\". No se desinstala nada.")
-                .setPositiveButton("Eliminar", (d, w) -> {
+        showMenu("¿Eliminar «" + c.name + "»? Sus apps vuelven a «Apps».",
+                new String[]{"Eliminar", "Cancelar"}, (d, which) -> {
+                    if (which != 0) return;
                     cats.remove(c);
                     saveCats();
                     List<String> drop = new ArrayList<>();
@@ -728,33 +963,16 @@ public class MainActivity extends Activity {
                     for (String p : drop) assign.remove(p);
                     saveAssign();
                     rebuild(true);
-                })
-                .setNegativeButton("Cancelar", null)
-                .show();
+                });
     }
 
     private void askCategoryName(final String title, final String current, final StringCb cb) {
         final List<String> opts = new ArrayList<>();
         Collections.addAll(opts, PRESET_NAMES);
         opts.add("Escribir otro nombre…");
-        listDialog(title, opts.toArray(new String[0]), (d, which) -> {
-            if (which < PRESET_NAMES.length) {
-                cb.on(PRESET_NAMES[which]);
-            } else {
-                final EditText et = new EditText(this);
-                et.setSingleLine(true);
-                et.setTextColor(Color.WHITE);
-                et.setText(current);
-                new AlertDialog.Builder(this, AlertDialog.THEME_HOLO_DARK)
-                        .setTitle(title)
-                        .setView(et)
-                        .setPositiveButton("Guardar", (dd, w) -> {
-                            String n = clean(et.getText().toString());
-                            if (n.length() > 0) cb.on(n);
-                        })
-                        .setNegativeButton("Cancelar", null)
-                        .show();
-            }
+        showMenu(title, opts.toArray(new String[0]), (d, which) -> {
+            if (which < PRESET_NAMES.length) cb.on(PRESET_NAMES[which]);
+            else showInput(title, current, cb);
         });
     }
 
@@ -763,150 +981,191 @@ public class MainActivity extends Activity {
         return s.length() > 24 ? s.substring(0, 24) : s;
     }
 
-    private String capitalize(String s) {
-        return s.length() == 0 ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
-    }
-
     // ---------- Fondo ----------
 
-    private void showBackgroundMenu() {
-        String[] items = new String[BG_NAMES.length + 1];
-        System.arraycopy(BG_NAMES, 0, items, 0, BG_NAMES.length);
-        items[BG_NAMES.length] = "Imagen propia (fondo.jpg)";
-        listDialog("Fondo", items, (d, which) -> {
-            if (which < BG_NAMES.length) {
-                prefs.edit().putString(KEY_BG, "p" + which).apply();
-                applyBackground();
-            } else {
-                File f = findBackgroundFile();
-                if (f == null) {
-                    File dir = getExternalFilesDir(null);
-                    String path = dir != null ? dir.getAbsolutePath() : "(no disponible)";
-                    new AlertDialog.Builder(this, AlertDialog.THEME_HOLO_DARK)
-                            .setTitle("Imagen propia")
-                            .setMessage("Copiá una imagen llamada fondo.jpg (o fondo.png) a esta carpeta, "
-                                    + "por ejemplo con Files to TV, y después volvé a elegir esta opción:\n\n" + path)
-                            .setPositiveButton("Entendido", null)
-                            .show();
-                } else {
-                    prefs.edit().putString(KEY_BG, "img").apply();
-                    applyBackground();
-                }
-            }
-        });
-    }
-
-    private File findBackgroundFile() {
-        File dir = getExternalFilesDir(null);
-        if (dir == null) return null;
-        String[] names = {"fondo.jpg", "fondo.jpeg", "fondo.png"};
-        for (String n : names) {
-            File f = new File(dir, n);
-            if (f.exists()) return f;
-        }
-        return null;
-    }
-
     private void applyBackground() {
-        String bg = prefs.getString(KEY_BG, "p0");
-        if ("img".equals(bg)) {
-            final File f = findBackgroundFile();
-            if (f != null) {
-                DisplayMetrics dm = getResources().getDisplayMetrics();
-                int sw = Math.max(dm.widthPixels, dm.heightPixels);
-                int sh = Math.min(dm.widthPixels, dm.heightPixels);
-                // Tope de 1280 px de ancho: la GPU lo estira y ahorramos RAM.
-                final int w = Math.min(sw, 1280);
-                final int h = Math.round(w * (float) sh / sw);
-                io.execute(() -> {
-                    final Bitmap b = decodeBackground(f, w, h);
-                    runOnUiThread(() -> {
-                        if (b == null) {
-                            toast("No se pudo cargar la imagen de fondo");
-                            setPresetBackground(0);
-                            return;
-                        }
-                        Bitmap old = bgBitmap;
-                        bgBitmap = b;
-                        root.setBackground(new BitmapDrawable(getResources(), b));
-                        if (old != null) old.recycle();
-                    });
-                });
-                return;
-            }
-            bg = "p0";
-        }
         int idx = 0;
         try {
-            idx = Integer.parseInt(bg.substring(1));
+            idx = Integer.parseInt(prefs.getString(KEY_BG, "p0").substring(1));
         } catch (Exception ignored) {
         }
-        setPresetBackground(idx);
-    }
-
-    private void setPresetBackground(int idx) {
         if (idx < 0 || idx >= BG_COLORS.length) idx = 0;
-        GradientDrawable g = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR, BG_COLORS[idx]);
-        Bitmap old = bgBitmap;
-        root.setBackground(g);
-        bgBitmap = null;
-        if (old != null) old.recycle();
+        bgIdx = idx;
+        bgGradient = new GradientDrawable(GradientDrawable.Orientation.TL_BR, BG_COLORS[idx].clone());
+        root.setBackground(bgGradient);
+        lastTint = 0;
     }
 
-    /** Decodifica reducida, recorta al tamaño elegido y oscurece para que se lea el texto. */
-    private Bitmap decodeBackground(File f, int w, int h) {
+    // ---------- Red ----------
+
+    private void registerNetwork() {
         try {
-            String path = f.getAbsolutePath();
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(path, o);
-            if (o.outWidth <= 0 || o.outHeight <= 0) return null;
-            int sample = 1;
-            while (o.outWidth / (sample * 2) >= w && o.outHeight / (sample * 2) >= h) sample *= 2;
-            BitmapFactory.Options o2 = new BitmapFactory.Options();
-            o2.inSampleSize = sample;
-            o2.inPreferredConfig = Bitmap.Config.RGB_565;
-            Bitmap src = BitmapFactory.decodeFile(path, o2);
-            if (src == null) return null;
-            float scale = Math.max((float) w / src.getWidth(), (float) h / src.getHeight());
-            Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565);
-            Canvas c = new Canvas(out);
-            Matrix m = new Matrix();
-            m.postScale(scale, scale);
-            m.postTranslate((w - src.getWidth() * scale) / 2f, (h - src.getHeight() * scale) / 2f);
-            c.drawBitmap(src, m, new Paint(Paint.FILTER_BITMAP_FLAG));
-            c.drawColor(0x99000000);
-            src.recycle();
-            return out;
-        } catch (Throwable t) {
-            return null;
+            cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            updateNetwork();
+            if (netCb == null) {
+                netCb = new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(android.net.Network n) { postNetworkUpdate(); }
+
+                    @Override
+                    public void onLost(android.net.Network n) { postNetworkUpdate(); }
+                };
+                NetworkRequest req = new NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build();
+                cm.registerNetworkCallback(req, netCb);
+            }
+        } catch (Throwable ignored) {
+            // Sin permiso o sin servicio: el ícono queda como está.
         }
     }
 
-    // ---------- Utilidades de UI ----------
+    private void unregisterNetwork() {
+        try {
+            if (cm != null && netCb != null) cm.unregisterNetworkCallback(netCb);
+        } catch (Throwable ignored) {
+        }
+        netCb = null;
+    }
 
-    private Drawable pillBackground() {
+    private void postNetworkUpdate() {
+        wifiBtn.postDelayed(() -> updateNetwork(), 400);
+    }
+
+    private void updateNetwork() {
+        boolean on = false;
+        try {
+            NetworkInfo ni = cm != null ? cm.getActiveNetworkInfo() : null;
+            on = ni != null && ni.isConnected();
+        } catch (Throwable ignored) {
+        }
+        wifiBtn.setAlpha(on ? 1f : 0.35f);
+    }
+
+    private void openWifiSettings() {
+        try {
+            Intent i = new Intent(Settings.ACTION_WIFI_SETTINGS);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception ex) {
+            try {
+                Intent i = new Intent(Settings.ACTION_SETTINGS);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(i);
+            } catch (Exception ex2) {
+                toast("No se pudo abrir los ajustes de red");
+            }
+        }
+    }
+
+    // ---------- Diálogos con el mismo estilo ----------
+
+    private Drawable selectorBackground(int radiusDp) {
         StateListDrawable s = new StateListDrawable();
-        s.addState(new int[]{android.R.attr.state_focused}, pill(0x38FFFFFF, true));
-        s.addState(new int[]{}, pill(0x1AFFFFFF, false));
+        s.addState(new int[]{android.R.attr.state_focused}, shape(0x4DFFFFFF, true, radiusDp));
+        s.addState(new int[]{android.R.attr.state_selected}, shape(0x33FFFFFF, false, radiusDp));
+        s.addState(new int[]{}, shape(0x00000000, false, radiusDp));
         return s;
     }
 
-    private GradientDrawable pill(int fill, boolean border) {
+    private GradientDrawable shape(int fill, boolean ring, int radiusDp) {
         GradientDrawable g = new GradientDrawable();
         g.setColor(fill);
-        g.setCornerRadius(dp(40));
-        if (border) g.setStroke(dp(3), Color.WHITE);
+        g.setCornerRadius(dp(radiusDp));
+        if (ring) g.setStroke(Math.max(2, dp(2)), Color.WHITE);
         return g;
     }
 
-    private void listDialog(String title, String[] items, DialogInterface.OnClickListener l) {
-        new AlertDialog.Builder(this, AlertDialog.THEME_HOLO_DARK)
-                .setTitle(title)
-                .setItems(items, l)
-                .setNegativeButton("Cancelar", null)
-                .show();
+    private TextView menuRow(String text) {
+        FocusTextView r = new FocusTextView(this);
+        r.setText(text);
+        r.setTextColor(TEXT_PRIMARY);
+        r.setTextSize(16);
+        r.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        r.setPadding(dp(16), dp(12), dp(16), dp(12));
+        r.setBackground(rowState.newDrawable());
+        return r;
+    }
+
+    private Dialog makeDialog(String title, View content) {
+        Dialog d = new Dialog(this);
+        d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(20), dp(22), dp(16));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xF2171D2E);
+        bg.setCornerRadius(dp(22));
+        box.setBackground(bg);
+
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextColor(TEXT_PRIMARY);
+        t.setTextSize(18);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.setPadding(dp(6), 0, dp(6), dp(12));
+        box.addView(t);
+        box.addView(content, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        d.setContentView(box);
+
+        Window w = d.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.setLayout(dp(440), ViewGroup.LayoutParams.WRAP_CONTENT);
+            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            w.setDimAmount(0.65f);
+        }
+        return d;
+    }
+
+    private void showMenu(String title, String[] items, final DialogInterface.OnClickListener l) {
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        ScrollView sv = new ScrollView(this);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.addView(list);
+        final Dialog[] holder = new Dialog[1];
+        for (int i = 0; i < items.length; i++) {
+            final int idx = i;
+            TextView r = menuRow(items[i]);
+            r.setOnClickListener(v -> {
+                holder[0].dismiss();
+                l.onClick(holder[0], idx);
+            });
+            list.addView(r, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        }
+        holder[0] = makeDialog(title, sv);
+        holder[0].show();
+        if (list.getChildCount() > 0) list.getChildAt(0).requestFocus();
+    }
+
+    private void showInput(String title, String current, final StringCb cb) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        final EditText et = new EditText(this);
+        et.setSingleLine(true);
+        et.setTextColor(TEXT_PRIMARY);
+        et.setTextSize(16);
+        et.setText(current);
+        col.addView(et, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        final Dialog[] holder = new Dialog[1];
+        TextView save = menuRow("Guardar");
+        save.setOnClickListener(v -> {
+            String n = clean(et.getText().toString());
+            holder[0].dismiss();
+            if (n.length() > 0) cb.on(n);
+        });
+        TextView cancel = menuRow("Cancelar");
+        cancel.setOnClickListener(v -> holder[0].dismiss());
+        col.addView(save, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        col.addView(cancel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        holder[0] = makeDialog(title, col);
+        holder[0].show();
+        et.requestFocus();
     }
 
     private void toast(String msg) {
