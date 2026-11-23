@@ -12,9 +12,11 @@ import android.content.pm.ResolveInfo;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
@@ -29,6 +31,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.text.TextPaint;
 import android.text.TextUtils;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
@@ -148,12 +151,20 @@ public class MainActivity extends Activity {
     private final TextPaint tileText = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint iconPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
 
+    // Pinturas de los paneles de Ajustes.
+    private final TextPaint pOptTitle = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint pOptVal = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint pOptHead = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint pOptState = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint pLine = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final List<OptionRow> panelRows = new ArrayList<>();
+    private boolean tilesDimmed = false;
+
     private int sizeIdx = 1;
     private boolean dynBg = true;
     private int iconPx, tileW, tileH, labelH, cornerPx, ringPx;
 
     private Drawable.ConstantState pillState;
-    private Drawable.ConstantState rowState;
     private GradientDrawable bgGradient;
     private int bgIdx = 0;
     private int lastTint = 0;
@@ -174,13 +185,13 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         pillState = selectorBackground(40).getConstantState();
-        rowState = selectorBackground(12).getConstantState();
         Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
         tileText.setColor(TEXT_PRIMARY);
         tileText.setTextAlign(Paint.Align.CENTER);
         tileText.setTypeface(medium);
         tileRing.setStyle(Paint.Style.STROKE);
         tileRing.setColor(Color.WHITE);
+        initPanelPaints(medium);
         applyMetrics();
         setContentView(buildRoot());
         applyBackground();
@@ -402,6 +413,7 @@ public class MainActivity extends Activity {
         rowsContainer.removeAllViews();
         allTiles.clear();
         firstCardRef = null;
+        tilesDimmed = false;
 
         boolean home = currentTabId.length() == 0;
         Set<String> catIds = new HashSet<>();
@@ -526,11 +538,14 @@ public class MainActivity extends Activity {
         @Override
         protected void onDraw(Canvas c) {
             boolean f = isFocused();
+            boolean dim = tilesDimmed && !f;
             int base = tint != 0 ? tint : 0xFF3B4663;
-            tileFill.setColor(((f ? 0xB0 : 0x70) << 24) | (base & 0x00FFFFFF));
+            int alpha = f ? 0xC8 : (dim ? 0x26 : 0x70);
+            tileFill.setColor((alpha << 24) | (base & 0x00FFFFFF));
             rect.set(0, 0, tileW, tileH);
             c.drawRoundRect(rect, cornerPx, cornerPx, tileFill);
             if (icon != null) {
+                iconPaint.setAlpha(dim ? 90 : 255);
                 c.drawBitmap(icon, (tileW - iconPx) / 2f, (tileH - iconPx) / 2f, iconPaint);
             }
             if (f) {
@@ -544,7 +559,10 @@ public class MainActivity extends Activity {
         @Override
         protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
             super.onFocusChanged(gain, direction, previouslyFocusedRect);
-            if (gain) tintBackground(tint);
+            if (gain) {
+                setTilesDimmed(true);
+                tintBackground(tint);
+            }
             invalidate();
         }
     }
@@ -560,8 +578,18 @@ public class MainActivity extends Activity {
         @Override
         protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
             super.onFocusChanged(gain, direction, previouslyFocusedRect);
-            if (gain) tintBackground(0);
+            if (gain) {
+                setTilesDimmed(false);
+                tintBackground(0);
+            }
         }
+    }
+
+    /** Cuando hay una app enfocada, las demás se apagan; al salir de las filas vuelven a la normalidad. */
+    private void setTilesDimmed(boolean v) {
+        if (v == tilesDimmed) return;
+        tilesDimmed = v;
+        for (TileView t : allTiles) t.invalidate();
     }
 
     // ---------- Íconos y color ----------
@@ -581,6 +609,12 @@ public class MainActivity extends Activity {
                     if (size != iconPx) return; // cambió el tamaño mientras cargaba
                     iconCache.put(e.pkg, b);
                     tintCache.put(e.pkg, tint);
+                    for (OptionRow r : panelRows) {
+                        if (e.pkg.equals(r.o.pkg)) {
+                            r.icon = b;
+                            r.invalidate();
+                        }
+                    }
                     for (TileView t : allTiles) {
                         if (t.pkg.equals(e.pkg)) {
                             t.icon = b;
@@ -823,15 +857,22 @@ public class MainActivity extends Activity {
             toast("No hay apps ocultas");
             return;
         }
-        String[] names = new String[list.size()];
-        for (int i = 0; i < names.length; i++) names[i] = list.get(i).label;
-        showMenu("Apps ocultas: elegí una para mostrarla", names, (d, which) -> {
-            Entry e = list.get(which);
+        List<Opt> ho = new ArrayList<>();
+        for (int i = 0; i < list.size(); i++) {
+            Opt x = valueOpt(i, list.get(i).label, "Mostrar");
+            x.pkg = list.get(i).pkg;
+            ho.add(x);
+        }
+        showOptions("Apps ocultas", ho, (x, r) -> {
+            Entry e = list.get(x.id);
             hidden.remove(e.pkg);
             saveHidden();
             pendingFocus = e.pkg;
             rebuild(true);
         });
+        for (Entry e : list) {
+            if (!iconCache.containsKey(e.pkg) && loading.add(e.pkg)) loadIconAsync(e);
+        }
     }
 
     private void showHelp() {
@@ -910,60 +951,79 @@ public class MainActivity extends Activity {
 
     // ---------- Ajustes ----------
 
+    private static final int ID_NEWCAT = 1, ID_RENAME = 2, ID_MOVECAT = 3, ID_DELCAT = 4,
+            ID_SIZE = 5, ID_BG = 6, ID_DYN = 7, ID_HIDDEN = 8, ID_HELP = 9, ID_ANDROID = 10;
+
     private void showSettingsMenu() {
         Map<String, Entry> inst = queryInstalled();
         int hiddenCount = 0;
         for (String p : hidden) if (inst.containsKey(p)) hiddenCount++;
-        String[] items = {
-                "Nueva categoría", "Renombrar categoría", "Subir / bajar categoría",
-                "Eliminar categoría",
-                "Apps ocultas (" + hiddenCount + ")",
-                "Tamaño de tarjetas: " + SIZE_NAMES[sizeIdx],
-                "Fondo",
-                "Fondo que cambia con la app: " + (dynBg ? "sí" : "no"),
-                "Cómo se usa",
-                "Ajustes de Android"};
-        showMenu("Ajustes", items, (d, which) -> {
-            switch (which) {
-                case 0:
+
+        List<Opt> o = new ArrayList<>();
+        o.add(header("Categorías"));
+        o.add(action(ID_NEWCAT, "Nueva categoría"));
+        o.add(action(ID_RENAME, "Renombrar categoría"));
+        o.add(action(ID_MOVECAT, "Subir / bajar categoría"));
+        o.add(action(ID_DELCAT, "Eliminar categoría"));
+        o.add(header("Apariencia"));
+        o.add(valueOpt(ID_SIZE, "Tamaño de tarjetas", SIZE_NAMES[sizeIdx]));
+        o.add(valueOpt(ID_BG, "Fondo", BG_NAMES[bgIdx]));
+        o.add(toggleOpt(ID_DYN, "Fondo que cambia con la app", dynBg));
+        o.add(header("Apps"));
+        o.add(valueOpt(ID_HIDDEN, "Apps ocultas", String.valueOf(hiddenCount)));
+        o.add(header("Ayuda"));
+        o.add(action(ID_HELP, "Cómo se usa"));
+        o.add(valueOpt(ID_ANDROID, "Ajustes de Android", ""));
+
+        showOptions("Ajustes", o, (opt, row) -> {
+            switch (opt.id) {
+                case ID_NEWCAT:
                     askCategoryName("Nueva categoría", "", name -> {
                         cats.add(new Cat("c" + System.currentTimeMillis(), name));
                         saveCats();
                         rebuild(true);
                     });
                     break;
-                case 1:
+                case ID_RENAME:
                     pickCategory("Renombrar…", c -> askCategoryName("Nuevo nombre", c.name, name -> {
                         c.name = name;
                         saveCats();
                         rebuild(true);
                     }));
                     break;
-                case 2:
+                case ID_MOVECAT:
                     pickCategory("Mover categoría…", this::moveCategoryDialog);
                     break;
-                case 3:
+                case ID_DELCAT:
                     pickCategory("Eliminar…", this::confirmDeleteCategory);
                     break;
-                case 4:
-                    showHiddenApps();
-                    break;
-                case 5:
-                    showMenu("Tamaño de tarjetas", SIZE_NAMES, (dd, w) -> {
-                        prefs.edit().putInt(KEY_SIZE, w).apply();
+                case ID_SIZE: {
+                    List<Opt> so = new ArrayList<>();
+                    for (int i = 0; i < SIZE_NAMES.length; i++) {
+                        Opt x = action(i, SIZE_NAMES[i]);
+                        x.selected = i == sizeIdx;
+                        so.add(x);
+                    }
+                    showOptions("Tamaño de tarjetas", so, (x, r) -> {
+                        prefs.edit().putInt(KEY_SIZE, x.id).apply();
                         rebuild(true);
                     });
                     break;
-                case 6:
+                }
+                case ID_BG:
                     showBackgroundMenu();
                     break;
-                case 7:
-                    prefs.edit().putBoolean(KEY_DYN, !dynBg).apply();
+                case ID_DYN:
                     dynBg = !dynBg;
+                    prefs.edit().putBoolean(KEY_DYN, dynBg).apply();
                     lastTint = -1;
                     tintBackground(0);
+                    if (row != null) row.toggle();
                     break;
-                case 8:
+                case ID_HIDDEN:
+                    showHiddenApps();
+                    break;
+                case ID_HELP:
                     showHelp();
                     break;
                 default:
@@ -979,8 +1039,17 @@ public class MainActivity extends Activity {
     }
 
     private void showBackgroundMenu() {
-        showMenu("Fondo", BG_NAMES, (d, which) -> {
-            prefs.edit().putString(KEY_BG, "p" + which).apply();
+        List<Opt> bo = new ArrayList<>();
+        for (int i = 0; i < BG_NAMES.length; i++) {
+            Opt x = action(i, BG_NAMES[i]);
+            x.swatch = true;
+            x.swA = BG_COLORS[i][0];
+            x.swB = BG_COLORS[i][1];
+            x.selected = i == bgIdx;
+            bo.add(x);
+        }
+        showOptions("Fondo", bo, (x, r) -> {
+            prefs.edit().putString(KEY_BG, "p" + x.id).apply();
             applyBackground();
         });
     }
@@ -1116,7 +1185,375 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ---------- Diálogos con el mismo estilo ----------
+    // ---------- Paneles propios (no se parecen a los de Android) ----------
+
+    private static final int K_ACTION = 0, K_TOGGLE = 1, K_VALUE = 2, K_HEADER = 3;
+    private static final int ACCENT = 0xFF3DDC97;
+
+    private static class Opt {
+        int id;
+        int kind;
+        String label;
+        String value;
+        String pkg;
+        boolean on;
+        boolean selected;
+        boolean swatch;
+        int swA, swB;
+
+        Opt(int id, int kind, String label) {
+            this.id = id;
+            this.kind = kind;
+            this.label = label;
+        }
+    }
+
+    private interface PanelCb { void on(Opt o, OptionRow row); }
+
+    private Opt header(String t) { return new Opt(-1, K_HEADER, t); }
+
+    private Opt action(int id, String t) { return new Opt(id, K_ACTION, t); }
+
+    private Opt valueOpt(int id, String t, String v) {
+        Opt o = new Opt(id, K_VALUE, t);
+        o.value = v;
+        return o;
+    }
+
+    private Opt toggleOpt(int id, String t, boolean on) {
+        Opt o = new Opt(id, K_TOGGLE, t);
+        o.on = on;
+        return o;
+    }
+
+    private void initPanelPaints(Typeface medium) {
+        float sd = getResources().getDisplayMetrics().scaledDensity;
+        pOptTitle.setColor(TEXT_PRIMARY);
+        pOptTitle.setTypeface(medium);
+        pOptTitle.setTextSize(16 * sd);
+        pOptVal.setColor(TEXT_SECONDARY);
+        pOptVal.setTypeface(medium);
+        pOptVal.setTextSize(14 * sd);
+        pOptVal.setTextAlign(Paint.Align.RIGHT);
+        pOptHead.setColor(0x99FFFFFF);
+        pOptHead.setTypeface(medium);
+        pOptHead.setTextSize(11 * sd);
+        pOptHead.setLetterSpacing(0.14f);
+        pOptState.setTypeface(medium);
+        pOptState.setTextSize(11 * sd);
+        pOptState.setTextAlign(Paint.Align.RIGHT);
+        pLine.setStyle(Paint.Style.STROKE);
+        pLine.setStrokeCap(Paint.Cap.ROUND);
+        pLine.setStrokeJoin(Paint.Join.ROUND);
+        pLine.setStrokeWidth(Math.max(2, dp(2)));
+    }
+
+    /** Una fila de panel = una sola vista dibujada a mano (título, interruptor, valor, ícono o muestra de color). */
+    private class OptionRow extends View {
+        final Opt o;
+        boolean on;
+        Bitmap icon;
+        String shownTitle = "";
+        String headText;
+        Paint swPaint;
+        private final RectF rect = new RectF();
+        private final Rect dst = new Rect();
+
+        OptionRow(Opt opt) {
+            super(MainActivity.this);
+            o = opt;
+            on = opt.on;
+            boolean head = opt.kind == K_HEADER;
+            setFocusable(!head);
+            setClickable(!head);
+            if (head) headText = opt.label.toUpperCase();
+            if (opt.swatch) {
+                swPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                swPaint.setShader(new LinearGradient(0, 0, dp(44), dp(28), opt.swA, opt.swB,
+                        Shader.TileMode.CLAMP));
+            }
+            if (opt.pkg != null) icon = iconCache.get(opt.pkg);
+        }
+
+        void toggle() {
+            on = !on;
+            invalidate();
+        }
+
+        @Override
+        protected void onMeasure(int widthSpec, int heightSpec) {
+            setMeasuredDimension(MeasureSpec.getSize(widthSpec),
+                    o.kind == K_HEADER ? dp(34) : dp(56));
+        }
+
+        private int leftInset() {
+            return dp(18) + ((o.swatch || o.pkg != null) ? dp(58) : 0);
+        }
+
+        private int rightReserve() {
+            switch (o.kind) {
+                case K_TOGGLE:
+                    return dp(18 + 50 + 12) + (int) pOptState.measureText("ACTIVADO") + dp(16);
+                case K_VALUE:
+                    return dp(20 + 16 + 12) + (o.value != null ? (int) pOptVal.measureText(o.value) : 0);
+                default:
+                    return o.selected ? dp(60) : dp(18);
+            }
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w, h, oldw, oldh);
+            if (o.kind == K_HEADER) return;
+            int avail = Math.max(dp(40), w - leftInset() - rightReserve());
+            shownTitle = TextUtils.ellipsize(o.label, pOptTitle, avail, TextUtils.TruncateAt.END).toString();
+        }
+
+        @Override
+        protected void onDraw(Canvas c) {
+            int w = getWidth();
+            int h = getHeight();
+            if (o.kind == K_HEADER) {
+                c.drawText(headText, dp(6), h - dp(8), pOptHead);
+                return;
+            }
+            boolean f = isFocused();
+            float r14 = dp(14);
+            tileFill.setColor(f ? 0x40FFFFFF : 0x14FFFFFF);
+            rect.set(0, 0, w, h);
+            c.drawRoundRect(rect, r14, r14, tileFill);
+            if (f) {
+                float hh = ringPx / 2f;
+                rect.set(hh, hh, w - hh, h - hh);
+                c.drawRoundRect(rect, r14, r14, tileRing);
+            }
+
+            float cy = h / 2f;
+            float x = dp(18);
+            if (o.swatch) {
+                float top = cy - dp(14);
+                c.save();
+                c.translate(x, top);
+                rect.set(0, 0, dp(44), dp(28));
+                c.drawRoundRect(rect, dp(8), dp(8), swPaint);
+                pLine.setColor(0x55FFFFFF);
+                pLine.setStrokeWidth(Math.max(1, dp(1)));
+                c.drawRoundRect(rect, dp(8), dp(8), pLine);
+                c.restore();
+                pLine.setStrokeWidth(Math.max(2, dp(2)));
+                x += dp(58);
+            } else if (o.pkg != null) {
+                if (icon != null) {
+                    int s = dp(36);
+                    int left = (int) x + dp(4);
+                    int top = (int) (cy - s / 2f);
+                    dst.set(left, top, left + s, top + s);
+                    iconPaint.setAlpha(255);
+                    c.drawBitmap(icon, null, dst, iconPaint);
+                }
+                x += dp(58);
+            }
+
+            float base = cy - (pOptTitle.descent() + pOptTitle.ascent()) / 2f;
+            c.drawText(shownTitle, x, base, pOptTitle);
+
+            float right = w - dp(18);
+            if (o.kind == K_TOGGLE) {
+                float tw = dp(50), th = dp(28);
+                float tl = right - tw;
+                tileFill.setColor(on ? ACCENT : 0x55FFFFFF);
+                rect.set(tl, cy - th / 2f, right, cy + th / 2f);
+                c.drawRoundRect(rect, th / 2f, th / 2f, tileFill);
+                tileFill.setColor(Color.WHITE);
+                c.drawCircle(on ? right - dp(14) : tl + dp(14), cy, dp(11), tileFill);
+                pOptState.setColor(on ? ACCENT : 0x99FFFFFF);
+                float sb = cy - (pOptState.descent() + pOptState.ascent()) / 2f;
+                c.drawText(on ? "ACTIVADO" : "APAGADO", tl - dp(12), sb, pOptState);
+            } else if (o.kind == K_VALUE) {
+                float x2 = w - dp(20);
+                pLine.setColor(0xB3FFFFFF);
+                c.drawLine(x2 - dp(6), cy - dp(6), x2, cy, pLine);
+                c.drawLine(x2, cy, x2 - dp(6), cy + dp(6), pLine);
+                if (o.value != null && o.value.length() > 0) {
+                    float vb = cy - (pOptVal.descent() + pOptVal.ascent()) / 2f;
+                    c.drawText(o.value, x2 - dp(16), vb, pOptVal);
+                }
+            } else if (o.selected) {
+                float cx = w - dp(30);
+                tileFill.setColor(ACCENT);
+                c.drawCircle(cx, cy, dp(12), tileFill);
+                pLine.setColor(0xFF0B1220);
+                c.drawLine(cx - dp(5), cy, cx - dp(1), cy + dp(4), pLine);
+                c.drawLine(cx - dp(1), cy + dp(4), cx + dp(5), cy - dp(4), pLine);
+            }
+        }
+    }
+
+    private int[] panelMetrics() {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int sw = Math.max(dm.widthPixels, dm.heightPixels);
+        int sh = Math.min(dm.widthPixels, dm.heightPixels);
+        int w = Math.min(dp(820), (int) (sw * 0.74f));
+        int maxH = Math.min(w * 9 / 16, (int) (sh * 0.88f));
+        return new int[]{w, maxH};
+    }
+
+    private Drawable panelBackground() {
+        int[] b = BG_COLORS[bgIdx];
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[]{blend(b[0], 0xFFFFFFFF, 0.07f), blend(b[1], 0xFFFFFFFF, 0.07f)});
+        g.setCornerRadius(dp(26));
+        g.setStroke(Math.max(1, dp(1)), 0x24FFFFFF);
+        return g;
+    }
+
+    /** Marco del panel: flotante, 16:9 como máximo, con el color del fondo del launcher. */
+    private Dialog panelDialog(String title, View body, int h) {
+        int[] m = panelMetrics();
+        Dialog d = new Dialog(this);
+        d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(24), dp(20), dp(24), dp(18));
+        box.setBackground(panelBackground());
+
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextColor(TEXT_PRIMARY);
+        t.setTextSize(22);
+        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        box.addView(t);
+
+        View line = new View(this);
+        line.setBackgroundColor(0x1FFFFFFF);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1)));
+        llp.topMargin = dp(12);
+        llp.bottomMargin = dp(10);
+        box.addView(line, llp);
+
+        box.addView(body, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        d.setContentView(box);
+
+        Window w = d.getWindow();
+        if (w != null) {
+            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.setLayout(m[0], h);
+            w.setGravity(Gravity.CENTER);
+            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            w.setDimAmount(0.7f);
+        }
+        return d;
+    }
+
+    private void showOptions(String title, List<Opt> opts, final PanelCb cb) {
+        int[] m = panelMetrics();
+        int content = dp(120);
+        for (Opt o : opts) content += o.kind == K_HEADER ? dp(34) : dp(64);
+        int h = Math.max((int) (m[1] * 0.6f), Math.min(m[1], content));
+
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        ScrollView sv = new ScrollView(this);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        sv.setClipToPadding(false);
+        sv.setPadding(dp(4), dp(4), dp(4), dp(4));
+        sv.addView(list);
+
+        final Dialog d = panelDialog(title, sv, h);
+        final List<OptionRow> mine = new ArrayList<>();
+        View focusTarget = null;
+        for (final Opt o : opts) {
+            final OptionRow r = new OptionRow(o);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.bottomMargin = o.kind == K_HEADER ? 0 : dp(8);
+            list.addView(r, lp);
+            panelRows.add(r);
+            mine.add(r);
+            if (o.kind == K_HEADER) continue;
+            r.setOnClickListener(v -> {
+                if (o.kind != K_TOGGLE) d.dismiss();
+                cb.on(o, r);
+            });
+            if (o.selected) focusTarget = r;
+            else if (focusTarget == null) focusTarget = r;
+        }
+        d.setOnDismissListener(x -> panelRows.removeAll(mine));
+        d.show();
+        if (focusTarget != null) focusTarget.requestFocus();
+    }
+
+    /** Lista simple de opciones con el mismo estilo (para los menús cortos). */
+    private void showMenu(String title, String[] items, final DialogInterface.OnClickListener l) {
+        List<Opt> opts = new ArrayList<>();
+        for (int i = 0; i < items.length; i++) opts.add(action(i, items[i]));
+        showOptions(title, opts, (o, row) -> l.onClick(null, o.id));
+    }
+
+    private void showMessage(String title, String text) {
+        int[] m = panelMetrics();
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(TEXT_SECONDARY);
+        tv.setTextSize(15);
+        tv.setLineSpacing(0, 1.2f);
+        tv.setPadding(dp(6), 0, dp(6), dp(14));
+        col.addView(tv);
+        ScrollView sv = new ScrollView(this);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.addView(col);
+        final Dialog d = panelDialog(title, sv, (int) (m[1] * 0.85f));
+        OptionRow ok = new OptionRow(action(0, "Entendido"));
+        ok.setOnClickListener(v -> d.dismiss());
+        col.addView(ok, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        d.show();
+        ok.requestFocus();
+    }
+
+    private void showInput(String title, String current, final StringCb cb) {
+        int[] m = panelMetrics();
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        final EditText et = new EditText(this);
+        et.setSingleLine(true);
+        et.setHint("Nombre");
+        et.setHintTextColor(TEXT_SECONDARY);
+        et.setTextColor(TEXT_PRIMARY);
+        et.setTextSize(18);
+        et.setText(current);
+        et.setPadding(dp(18), dp(12), dp(18), dp(12));
+        et.setBackground(shape(0x1FFFFFFF, false, 14));
+        LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        elp.bottomMargin = dp(12);
+        col.addView(et, elp);
+        ScrollView sv = new ScrollView(this);
+        sv.setVerticalScrollBarEnabled(false);
+        sv.addView(col);
+        final Dialog d = panelDialog(title, sv, (int) (m[1] * 0.85f));
+
+        OptionRow save = new OptionRow(action(0, "Guardar"));
+        save.setOnClickListener(v -> {
+            String n = clean(et.getText().toString());
+            d.dismiss();
+            if (n.length() > 0) cb.on(n);
+        });
+        OptionRow cancel = new OptionRow(action(1, "Cancelar"));
+        cancel.setOnClickListener(v -> d.dismiss());
+        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        rlp.bottomMargin = dp(8);
+        col.addView(save, rlp);
+        col.addView(cancel, rlp);
+        d.show();
+        et.requestFocus();
+    }
 
     private Drawable selectorBackground(int radiusDp) {
         StateListDrawable s = new StateListDrawable();
@@ -1132,119 +1569,6 @@ public class MainActivity extends Activity {
         g.setCornerRadius(dp(radiusDp));
         if (ring) g.setStroke(Math.max(2, dp(2)), Color.WHITE);
         return g;
-    }
-
-    private TextView menuRow(String text) {
-        FocusTextView r = new FocusTextView(this);
-        r.setText(text);
-        r.setTextColor(TEXT_PRIMARY);
-        r.setTextSize(16);
-        r.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        r.setPadding(dp(16), dp(12), dp(16), dp(12));
-        r.setBackground(rowState.newDrawable());
-        return r;
-    }
-
-    private Dialog makeDialog(String title, View content) {
-        Dialog d = new Dialog(this);
-        d.requestWindowFeature(Window.FEATURE_NO_TITLE);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(22), dp(20), dp(22), dp(16));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xF2171D2E);
-        bg.setCornerRadius(dp(22));
-        box.setBackground(bg);
-
-        TextView t = new TextView(this);
-        t.setText(title);
-        t.setTextColor(TEXT_PRIMARY);
-        t.setTextSize(18);
-        t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setPadding(dp(6), 0, dp(6), dp(12));
-        box.addView(t);
-        box.addView(content, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        d.setContentView(box);
-
-        Window w = d.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            w.setLayout(dp(440), ViewGroup.LayoutParams.WRAP_CONTENT);
-            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            w.setDimAmount(0.65f);
-        }
-        return d;
-    }
-
-    private void showMenu(String title, String[] items, final DialogInterface.OnClickListener l) {
-        LinearLayout list = new LinearLayout(this);
-        list.setOrientation(LinearLayout.VERTICAL);
-        ScrollView sv = new ScrollView(this);
-        sv.setVerticalScrollBarEnabled(false);
-        sv.addView(list);
-        final Dialog[] holder = new Dialog[1];
-        for (int i = 0; i < items.length; i++) {
-            final int idx = i;
-            TextView r = menuRow(items[i]);
-            r.setOnClickListener(v -> {
-                holder[0].dismiss();
-                l.onClick(holder[0], idx);
-            });
-            list.addView(r, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        }
-        holder[0] = makeDialog(title, sv);
-        holder[0].show();
-        if (list.getChildCount() > 0) list.getChildAt(0).requestFocus();
-    }
-
-    private void showMessage(String title, String text) {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextColor(TEXT_SECONDARY);
-        tv.setTextSize(15);
-        tv.setLineSpacing(0, 1.2f);
-        tv.setPadding(dp(6), 0, dp(6), dp(14));
-        col.addView(tv);
-        final Dialog[] holder = new Dialog[1];
-        TextView ok = menuRow("Entendido");
-        ok.setOnClickListener(v -> holder[0].dismiss());
-        col.addView(ok, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        holder[0] = makeDialog(title, col);
-        holder[0].show();
-        ok.requestFocus();
-    }
-
-    private void showInput(String title, String current, final StringCb cb) {
-        LinearLayout col = new LinearLayout(this);
-        col.setOrientation(LinearLayout.VERTICAL);
-        final EditText et = new EditText(this);
-        et.setSingleLine(true);
-        et.setTextColor(TEXT_PRIMARY);
-        et.setTextSize(16);
-        et.setText(current);
-        col.addView(et, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        final Dialog[] holder = new Dialog[1];
-        TextView save = menuRow("Guardar");
-        save.setOnClickListener(v -> {
-            String n = clean(et.getText().toString());
-            holder[0].dismiss();
-            if (n.length() > 0) cb.on(n);
-        });
-        TextView cancel = menuRow("Cancelar");
-        cancel.setOnClickListener(v -> holder[0].dismiss());
-        col.addView(save, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        col.addView(cancel, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        holder[0] = makeDialog(title, col);
-        holder[0].show();
-        et.requestFocus();
     }
 
     private void toast(String msg) {
