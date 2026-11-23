@@ -31,7 +31,6 @@ import android.text.TextPaint;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.KeyEvent;
-import android.view.SoundEffectConstants;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -61,7 +60,7 @@ import java.util.concurrent.Executors;
  * - Pestañas arriba (Inicio + categorías), fila "Recientes", tarjetas banner 16:9.
  * - Cada tarjeta es UNA sola vista dibujada a mano: borde blanco al enfocar, nombre solo en la enfocada.
  * - Color suave de cada tarjeta y tinte del fondo tomados del color del ícono (sin imágenes extra).
- * - Sonido de navegación del sistema en todas las filas y botones.
+ * - Apps ocultas, ayuda de uso y más fondos.
  */
 public class MainActivity extends Activity {
 
@@ -70,6 +69,8 @@ public class MainActivity extends Activity {
     private static final String KEY_ASSIGN = "assign";  // líneas "paquete|id"
     private static final String KEY_ORDER = "order";    // líneas "paquete"
     private static final String KEY_RECENT = "recent";  // líneas "paquete" (más reciente primero)
+    private static final String KEY_HIDDEN = "hidden"; // líneas "paquete"
+    private static final String KEY_TIP = "tip_seen";  // ya vio la ayuda de uso
     private static final String KEY_BG = "bg";          // "p0".."p7"
     private static final String KEY_SIZE = "size";      // 0 chico, 1 mediano, 2 grande
     private static final String KEY_DYN = "dyn";        // fondo que se tiñe con la app enfocada
@@ -80,7 +81,9 @@ public class MainActivity extends Activity {
 
     private static final String[] BG_NAMES = {
             "Azul noche", "Violeta", "Verde bosque", "Rojo vino", "Gris carbón",
-            "Atardecer", "Océano", "Negro (el más liviano)"};
+            "Atardecer", "Océano", "Negro (el más liviano)",
+            "Aurora", "Medianoche", "Esmeralda", "Rosa neón", "Cobre",
+            "Cielo nocturno", "Grafito azulado", "Vino y azul"};
     private static final int[][] BG_COLORS = {
             {0xFF0B1220, 0xFF1C2744},
             {0xFF160B24, 0xFF3A1F5C},
@@ -89,7 +92,15 @@ public class MainActivity extends Activity {
             {0xFF121212, 0xFF2A2A2E},
             {0xFF1B1030, 0xFF5A2A4A},
             {0xFF04121C, 0xFF0E4A5C},
-            {0xFF000000, 0xFF000000}};
+            {0xFF000000, 0xFF000000},
+            {0xFF05181C, 0xFF3A2A6B},
+            {0xFF02040A, 0xFF101A33},
+            {0xFF04140E, 0xFF0F5A45},
+            {0xFF1A0714, 0xFF6A1F5C},
+            {0xFF1A0F08, 0xFF5C3418},
+            {0xFF0A1330, 0xFF1F5A8C},
+            {0xFF0E1116, 0xFF283244},
+            {0xFF14091F, 0xFF1D3A6B}};
     private static final String[] PRESET_NAMES = {
             "Streaming", "Juegos", "Música", "Herramientas", "Favoritas", "Otros"};
     private static final String[] SIZE_NAMES = {"Chico", "Mediano", "Grande"};
@@ -121,6 +132,7 @@ public class MainActivity extends Activity {
     private final Map<String, String> assign = new HashMap<>();
     private List<String> order = new ArrayList<>();
     private List<String> recent = new ArrayList<>();
+    private List<String> hidden = new ArrayList<>();
     private final Map<String, String> labelCache = new HashMap<>();
 
     private final Map<String, Bitmap> iconCache = new HashMap<>();
@@ -179,6 +191,10 @@ public class MainActivity extends Activity {
         super.onResume();
         registerNetwork();
         rebuild(false);
+        if (!prefs.getBoolean(KEY_TIP, false)) {
+            prefs.edit().putBoolean(KEY_TIP, true).apply();
+            root.post(() -> showHelp());
+        }
     }
 
     @Override
@@ -344,9 +360,12 @@ public class MainActivity extends Activity {
     private void rebuild(boolean force) {
         loadState();
         Map<String, Entry> inst = queryInstalled();
-        List<Entry> all = orderedEntries(inst);
+        List<Entry> ordered = orderedEntries(inst);
+        Set<String> hid = new HashSet<>(hidden);
+        List<Entry> all = new ArrayList<>();
+        for (Entry e : ordered) if (!hid.contains(e.pkg)) all.add(e);
         List<Entry> recents = new ArrayList<>();
-        for (String p : recent) if (inst.containsKey(p)) recents.add(inst.get(p));
+        for (String p : recent) if (inst.containsKey(p) && !hid.contains(p)) recents.add(inst.get(p));
 
         boolean tabOk = currentTabId.length() == 0;
         for (Cat c : cats) if (c.id.equals(currentTabId)) tabOk = true;
@@ -354,7 +373,7 @@ public class MainActivity extends Activity {
 
         String sig = join(order) + "#" + prefs.getString(KEY_CATS, "") + "#"
                 + prefs.getString(KEY_ASSIGN, "") + "#" + prefs.getInt(KEY_SIZE, 1)
-                + "#" + join(recent) + "#" + currentTabId;
+                + "#" + join(recent) + "#" + currentTabId + "#" + join(hidden);
         if (!force && sig.equals(signature) && rowsContainer.getChildCount() > 0) return;
         signature = sig;
 
@@ -525,15 +544,12 @@ public class MainActivity extends Activity {
         @Override
         protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
             super.onFocusChanged(gain, direction, previouslyFocusedRect);
-            if (gain) {
-                playNav(this, direction);
-                tintBackground(tint);
-            }
+            if (gain) tintBackground(tint);
             invalidate();
         }
     }
 
-    /** Botón/pestaña de texto con el mismo sonido de navegación que las tarjetas. */
+    /** Botón/pestaña de texto enfocable. */
     private class FocusTextView extends TextView {
         FocusTextView(Context c) {
             super(c);
@@ -544,23 +560,8 @@ public class MainActivity extends Activity {
         @Override
         protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
             super.onFocusChanged(gain, direction, previouslyFocusedRect);
-            if (gain) {
-                playNav(this, direction);
-                tintBackground(0);
-            }
+            if (gain) tintBackground(0);
         }
-    }
-
-    private void playNav(View v, int direction) {
-        int fx;
-        switch (direction) {
-            case View.FOCUS_UP: fx = SoundEffectConstants.NAVIGATION_UP; break;
-            case View.FOCUS_DOWN: fx = SoundEffectConstants.NAVIGATION_DOWN; break;
-            case View.FOCUS_LEFT: fx = SoundEffectConstants.NAVIGATION_LEFT; break;
-            case View.FOCUS_RIGHT: fx = SoundEffectConstants.NAVIGATION_RIGHT; break;
-            default: return;
-        }
-        v.playSoundEffect(fx);
     }
 
     // ---------- Íconos y color ----------
@@ -658,6 +659,7 @@ public class MainActivity extends Activity {
         }
         order = readLines(KEY_ORDER);
         recent = readLines(KEY_RECENT);
+        hidden = readLines(KEY_HIDDEN);
     }
 
     private List<String> readLines(String key) {
@@ -690,6 +692,10 @@ public class MainActivity extends Activity {
 
     private void saveOrder() {
         prefs.edit().putString(KEY_ORDER, join(order)).apply();
+    }
+
+    private void saveHidden() {
+        prefs.edit().putString(KEY_HIDDEN, join(hidden)).apply();
     }
 
     private void saveRecent() {
@@ -767,31 +773,73 @@ public class MainActivity extends Activity {
 
     private void showAppMenu(final Entry e, final List<Entry> rowItems, final int index) {
         String[] items = {"Mover a otra categoría", "Mover a la derecha", "Mover a la izquierda",
-                "Información de la app", "Desinstalar"};
+                "Ocultar app", "Información de la app", "Desinstalar"};
         showMenu(e.label, items, (d, which) -> {
             switch (which) {
                 case 0: chooseCategoryFor(e); break;
                 case 1: moveInRow(e, rowItems, index, 1); break;
                 case 2: moveInRow(e, rowItems, index, -1); break;
-                case 3: openAppInfo(e.pkg); break;
+                case 3: hideApp(e, rowItems, index); break;
+                case 4: openAppInfo(e.pkg); break;
                 default: uninstall(e.pkg);
             }
         });
     }
 
     private void showRecentMenu(final Entry e) {
-        String[] items = {"Quitar de Recientes", "Información de la app", "Desinstalar"};
+        String[] items = {"Quitar de Recientes", "Ocultar app", "Información de la app", "Desinstalar"};
         showMenu(e.label, items, (d, which) -> {
             if (which == 0) {
                 recent.remove(e.pkg);
                 saveRecent();
                 rebuild(true);
             } else if (which == 1) {
+                hideApp(e, null, -1);
+            } else if (which == 2) {
                 openAppInfo(e.pkg);
             } else {
                 uninstall(e.pkg);
             }
         });
+    }
+
+    private void hideApp(Entry e, List<Entry> rowItems, int index) {
+        if (!hidden.contains(e.pkg)) hidden.add(e.pkg);
+        saveHidden();
+        if (recent.remove(e.pkg)) saveRecent();
+        if (rowItems != null) {
+            if (index + 1 < rowItems.size()) pendingFocus = rowItems.get(index + 1).pkg;
+            else if (index - 1 >= 0) pendingFocus = rowItems.get(index - 1).pkg;
+        }
+        toast("«" + e.label + "» oculta. Para mostrarla: Ajustes > Apps ocultas");
+        rebuild(true);
+    }
+
+    private void showHiddenApps() {
+        Map<String, Entry> inst = queryInstalled();
+        final List<Entry> list = new ArrayList<>();
+        for (String p : hidden) if (inst.containsKey(p)) list.add(inst.get(p));
+        if (list.isEmpty()) {
+            toast("No hay apps ocultas");
+            return;
+        }
+        String[] names = new String[list.size()];
+        for (int i = 0; i < names.length; i++) names[i] = list.get(i).label;
+        showMenu("Apps ocultas: elegí una para mostrarla", names, (d, which) -> {
+            Entry e = list.get(which);
+            hidden.remove(e.pkg);
+            saveHidden();
+            pendingFocus = e.pkg;
+            rebuild(true);
+        });
+    }
+
+    private void showHelp() {
+        showMessage("Cómo se usa",
+                "\u2022  OK: abrir la app.\n"
+                + "\u2022  Mantener OK sobre una app: mover, cambiar de categoría, ocultar, ver información o desinstalar.\n"
+                + "\u2022  Pestañas de arriba: elegí una para ver solo esa categoría. El botón Home vuelve a Inicio.\n"
+                + "\u2022  Ajustes: categorías, tamaño de tarjetas, fondo y apps ocultas.");
     }
 
     private void openAppInfo(String pkg) {
@@ -863,12 +911,17 @@ public class MainActivity extends Activity {
     // ---------- Ajustes ----------
 
     private void showSettingsMenu() {
+        Map<String, Entry> inst = queryInstalled();
+        int hiddenCount = 0;
+        for (String p : hidden) if (inst.containsKey(p)) hiddenCount++;
         String[] items = {
                 "Nueva categoría", "Renombrar categoría", "Subir / bajar categoría",
                 "Eliminar categoría",
+                "Apps ocultas (" + hiddenCount + ")",
                 "Tamaño de tarjetas: " + SIZE_NAMES[sizeIdx],
                 "Fondo",
                 "Fondo que cambia con la app: " + (dynBg ? "sí" : "no"),
+                "Cómo se usa",
                 "Ajustes de Android"};
         showMenu("Ajustes", items, (d, which) -> {
             switch (which) {
@@ -893,19 +946,25 @@ public class MainActivity extends Activity {
                     pickCategory("Eliminar…", this::confirmDeleteCategory);
                     break;
                 case 4:
+                    showHiddenApps();
+                    break;
+                case 5:
                     showMenu("Tamaño de tarjetas", SIZE_NAMES, (dd, w) -> {
                         prefs.edit().putInt(KEY_SIZE, w).apply();
                         rebuild(true);
                     });
                     break;
-                case 5:
+                case 6:
                     showBackgroundMenu();
                     break;
-                case 6:
+                case 7:
                     prefs.edit().putBoolean(KEY_DYN, !dynBg).apply();
                     dynBg = !dynBg;
                     lastTint = -1;
                     tintBackground(0);
+                    break;
+                case 8:
+                    showHelp();
                     break;
                 default:
                     try {
@@ -1138,6 +1197,26 @@ public class MainActivity extends Activity {
         holder[0] = makeDialog(title, sv);
         holder[0].show();
         if (list.getChildCount() > 0) list.getChildAt(0).requestFocus();
+    }
+
+    private void showMessage(String title, String text) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(TEXT_SECONDARY);
+        tv.setTextSize(15);
+        tv.setLineSpacing(0, 1.2f);
+        tv.setPadding(dp(6), 0, dp(6), dp(14));
+        col.addView(tv);
+        final Dialog[] holder = new Dialog[1];
+        TextView ok = menuRow("Entendido");
+        ok.setOnClickListener(v -> holder[0].dismiss());
+        col.addView(ok, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        holder[0] = makeDialog(title, col);
+        holder[0].show();
+        ok.requestFocus();
     }
 
     private void showInput(String title, String current, final StringCb cb) {
