@@ -7,9 +7,12 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -46,6 +49,8 @@ import android.widget.TextClock;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -596,14 +601,9 @@ public class MainActivity extends Activity {
 
     private void loadIconAsync(final Entry e) {
         final int size = iconPx;
-        final PackageManager pm = getPackageManager();
         io.execute(() -> {
             try {
-                Drawable d = pm.getActivityIcon(e.cn);
-                final Bitmap b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-                Canvas cv = new Canvas(b);
-                d.setBounds(0, 0, size, size);
-                d.draw(cv);
+                final Bitmap b = loadIconBitmap(e, size);
                 final int tint = averageColor(b);
                 runOnUiThread(() -> {
                     if (size != iconPx) return; // cambió el tamaño mientras cargaba
@@ -631,6 +631,73 @@ public class MainActivity extends Activity {
                 // Si un ícono falla, la tarjeta queda sin ícono pero con nombre.
             }
         });
+    }
+
+    /**
+     * Devuelve el ícono ya achicado al tamaño exacto. Primero mira la carpeta de caché
+     * (archivitos de unos KB); si no está, lo pide al sistema en baja resolución,
+     * lo achica una sola vez y lo guarda para la próxima.
+     */
+    private Bitmap loadIconBitmap(Entry e, int size) {
+        PackageManager pm = getPackageManager();
+        long stamp = 0;
+        try {
+            stamp = pm.getPackageInfo(e.pkg, 0).lastUpdateTime; // si la app se actualiza, se regenera
+        } catch (Exception ignored) {
+        }
+        File dir = new File(getCacheDir(), "icons");
+        File f = new File(dir, e.pkg + "__" + size + "__" + stamp + ".png");
+        if (f.exists()) {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inScaled = false;
+            Bitmap cached = BitmapFactory.decodeFile(f.getAbsolutePath(), o);
+            if (cached != null) return cached;
+        }
+        Drawable d = lowResIcon(pm, e.cn, size);
+        Bitmap b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas cv = new Canvas(b);
+        d.setBounds(0, 0, size, size);
+        d.draw(cv);
+        saveIcon(dir, f, e.pkg, b);
+        return b;
+    }
+
+    /** Pide el ícono con una densidad parecida al tamaño que necesitamos, y no la más grande. */
+    private Drawable lowResIcon(PackageManager pm, ComponentName cn, int sizePx) {
+        try {
+            ActivityInfo ai = pm.getActivityInfo(cn, 0);
+            int res = ai.icon != 0 ? ai.icon : ai.applicationInfo.icon;
+            if (res != 0) {
+                Resources r = pm.getResourcesForApplication(ai.applicationInfo);
+                int dpi = Math.max(120, Math.min(640, Math.round(sizePx * 160f / 48f)));
+                Drawable d = r.getDrawableForDensity(res, dpi, null);
+                if (d != null) return d;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            return pm.getActivityIcon(cn);
+        } catch (Throwable t) {
+            return pm.getDefaultActivityIcon();
+        }
+    }
+
+    private void saveIcon(File dir, File f, String pkg, Bitmap b) {
+        try {
+            if (!dir.exists()) dir.mkdirs();
+            File[] old = dir.listFiles();
+            if (old != null) {
+                for (File o : old) if (o.getName().startsWith(pkg + "__")) o.delete();
+            }
+            FileOutputStream out = new FileOutputStream(f);
+            try {
+                b.compress(Bitmap.CompressFormat.PNG, 100, out);
+            } finally {
+                out.close();
+            }
+        } catch (Throwable ignored) {
+            // Si no se puede guardar, se sigue funcionando sin caché en disco.
+        }
     }
 
     /** Color promedio del ícono (ignora lo transparente), suavizado hacia un azul oscuro. */
