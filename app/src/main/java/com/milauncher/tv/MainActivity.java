@@ -42,6 +42,7 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -86,6 +87,7 @@ public class MainActivity extends Activity {
     private static final int MAX_RECENT = 5;
     private static final int TEXT_PRIMARY = 0xFFFFFFFF;
     private static final int TEXT_SECONDARY = 0xB3FFFFFF;
+    private static final int TEXT_DARK = 0xFF1B1A2E;
 
     private static final String[] BG_NAMES = {
             "Azul noche", "Violeta", "Verde bosque", "Rojo vino", "Gris carbón",
@@ -131,6 +133,8 @@ public class MainActivity extends Activity {
 
     private SharedPreferences prefs;
     private LinearLayout root;
+    private FrameLayout screenRoot;
+    private Panel currentPanel;
     private LinearLayout tabsRow;
     private LinearLayout rowsContainer;
     private ScrollView vscroll;
@@ -167,9 +171,10 @@ public class MainActivity extends Activity {
 
     private int sizeIdx = 1;
     private boolean dynBg = true;
-    private int iconPx, tileW, tileH, labelH, cornerPx, ringPx;
+    private int iconPx, tileW, tileH, labelH, cornerPx, ringPx, circleD, circleW;
 
     private Drawable.ConstantState pillState;
+    private Drawable.ConstantState tabState;
     private GradientDrawable bgGradient;
     private int bgIdx = 0;
     private int lastTint = 0;
@@ -190,15 +195,20 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         pillState = selectorBackground(40).getConstantState();
+        tabState = tabSelector().getConstantState();
         Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
-        tileText.setColor(TEXT_PRIMARY);
+        tileText.setColor(TEXT_DARK);
         tileText.setTextAlign(Paint.Align.CENTER);
         tileText.setTypeface(medium);
         tileRing.setStyle(Paint.Style.STROKE);
         tileRing.setColor(Color.WHITE);
         initPanelPaints(medium);
         applyMetrics();
-        setContentView(buildRoot());
+        View main = buildRoot();
+        screenRoot = new FrameLayout(this);
+        screenRoot.addView(main, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(screenRoot);
         applyBackground();
     }
 
@@ -215,6 +225,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        if (currentPanel != null) currentPanel.dismiss();
         unregisterNetwork();
         super.onPause();
     }
@@ -222,6 +233,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (currentPanel != null) currentPanel.dismiss();
         // Al apretar Home: volver a "Inicio", arriba y con foco en la primera app.
         if (currentTabId.length() > 0) {
             currentTabId = "";
@@ -234,13 +246,14 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        // Un launcher no se cierra con Atrás.
+        // Atrás cierra el panel abierto; un launcher en sí no se cierra con Atrás.
+        if (currentPanel != null) currentPanel.dismiss();
     }
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_MENU) {
-            showSettingsMenu();
+            if (currentPanel == null) showSettingsMenu();
             return true;
         }
         return super.onKeyDown(keyCode, event);
@@ -259,8 +272,10 @@ public class MainActivity extends Activity {
         dynBg = prefs.getBoolean(KEY_DYN, true);
         tileW = dp(TILE_DP[sizeIdx]);
         tileH = tileW * 9 / 16;
-        iconPx = (int) (tileH * 0.58f);
-        labelH = dp(24);
+        circleD = (int) (tileH * 1.1f);
+        circleW = circleD + dp(24);
+        iconPx = (int) (circleD * 0.62f);
+        labelH = dp(32);
         cornerPx = dp(12);
         ringPx = Math.max(2, dp(2));
         tileRing.setStrokeWidth(ringPx);
@@ -282,15 +297,21 @@ public class MainActivity extends Activity {
 
         tabsRow = new LinearLayout(this);
         tabsRow.setOrientation(LinearLayout.HORIZONTAL);
-        top.addView(tabsRow, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        HorizontalScrollView tabsScroll = new HorizontalScrollView(this);
+        tabsScroll.setHorizontalScrollBarEnabled(false);
+        tabsScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
+        tabsScroll.addView(tabsRow, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        top.addView(tabsScroll, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         wifiBtn = new FocusTextView(this);
         wifiBtn.setCompoundDrawablesWithIntrinsicBounds(R.drawable.ic_wifi, 0, 0, 0);
-        wifiBtn.setPadding(dp(12), dp(8), dp(12), dp(8));
+        wifiBtn.setGravity(Gravity.CENTER);
+        wifiBtn.setPadding(dp(8), 0, dp(8), 0);
         wifiBtn.setBackground(pillState.newDrawable());
         wifiBtn.setOnClickListener(v -> openWifiSettings());
-        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(dp(40), dp(40));
         wlp.rightMargin = dp(8);
         top.addView(wifiBtn, wlp);
 
@@ -350,12 +371,16 @@ public class MainActivity extends Activity {
         boolean active = id.equals(currentTabId);
         FocusTextView t = new FocusTextView(this);
         t.setText(label);
-        t.setTextSize(15);
+        t.setTextSize(16);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        t.tabStyle = true;
+        t.setSingleLine(true);
+        t.setEllipsize(TextUtils.TruncateAt.END);
+        t.setMaxWidth(dp(260));
         t.setTextColor(active ? TEXT_PRIMARY : TEXT_SECONDARY);
+        t.setPadding(dp(20), dp(9), dp(20), dp(9));
+        t.setBackground(tabState.newDrawable());
         t.setSelected(active);
-        t.setPadding(dp(18), dp(8), dp(18), dp(8));
-        t.setBackground(pillState.newDrawable());
         t.setTag("tab:" + id);
         t.setOnClickListener(v -> {
             if (!id.equals(currentTabId)) {
@@ -464,7 +489,7 @@ public class MainActivity extends Activity {
         t.setTextColor(TEXT_SECONDARY);
         t.setTextSize(15);
         t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        t.setPadding(dp(8), dp(4), 0, dp(2));
+        t.setPadding(isRecent ? dp(8) : dp(20), dp(4), 0, dp(2));
         section.addView(t);
 
         if (items.isEmpty()) {
@@ -480,13 +505,12 @@ public class MainActivity extends Activity {
             hs.setOverScrollMode(View.OVER_SCROLL_NEVER);
             hs.setClipToPadding(false);
             hs.setPadding(dp(8), dp(6), dp(8), dp(6));
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
+            RowLayout row = new RowLayout(this);
             for (int i = 0; i < items.size(); i++) {
                 TileView tile = makeTile(items.get(i), items, i, isRecent);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.rightMargin = dp(14);
+                lp.rightMargin = isRecent ? dp(14) : dp(2);
                 row.addView(tile, lp);
             }
             hs.addView(row, new ViewGroup.LayoutParams(
@@ -513,14 +537,16 @@ public class MainActivity extends Activity {
         return v;
     }
 
-    /** Una tarjeta = una sola vista dibujada a mano (banner 16:9). */
+    /** Una tarjeta = una sola vista dibujada a mano: círculo (apps) o banner 16:9 (recientes). */
     private class TileView extends View {
         final String pkg;
         final String shownLabel;
+        final float labelW;
         final boolean recent;
         Bitmap icon;
         int tint;
         private final RectF rect = new RectF();
+        private final Rect dst = new Rect();
 
         TileView(Entry e, boolean isRecent) {
             super(MainActivity.this);
@@ -529,15 +555,26 @@ public class MainActivity extends Activity {
             icon = iconCache.get(e.pkg);
             Integer t = tintCache.get(e.pkg);
             tint = t != null ? t : 0;
-            shownLabel = TextUtils.ellipsize(e.label, tileText, tileW - dp(8),
-                    TextUtils.TruncateAt.END).toString();
+            int maxW = (recent ? tileW : circleW) - dp(30);
+            shownLabel = TextUtils.ellipsize(e.label, tileText, maxW, TextUtils.TruncateAt.END).toString();
+            labelW = tileText.measureText(shownLabel);
             setFocusable(true);
             setClickable(true);
         }
 
         @Override
         protected void onMeasure(int widthSpec, int heightSpec) {
-            setMeasuredDimension(tileW, tileH + labelH);
+            if (recent) setMeasuredDimension(tileW, tileH + labelH);
+            else setMeasuredDimension(circleW, circleD + labelH);
+        }
+
+        private void drawIcon(Canvas c, float cx, float cy, int size, boolean dim) {
+            if (icon == null) return;
+            iconPaint.setAlpha(dim ? 90 : 255);
+            int l = (int) (cx - size / 2f);
+            int t = (int) (cy - size / 2f);
+            dst.set(l, t, l + size, t + size);
+            c.drawBitmap(icon, null, dst, iconPaint);
         }
 
         @Override
@@ -545,19 +582,41 @@ public class MainActivity extends Activity {
             boolean f = isFocused();
             boolean dim = tilesDimmed && !f;
             int base = tint != 0 ? tint : 0xFF3B4663;
-            int alpha = f ? 0xC8 : (dim ? 0x26 : 0x70);
-            tileFill.setColor((alpha << 24) | (base & 0x00FFFFFF));
-            rect.set(0, 0, tileW, tileH);
-            c.drawRoundRect(rect, cornerPx, cornerPx, tileFill);
-            if (icon != null) {
-                iconPaint.setAlpha(dim ? 90 : 255);
-                c.drawBitmap(icon, (tileW - iconPx) / 2f, (tileH - iconPx) / 2f, iconPaint);
+            int w = getWidth();
+            float bottom;
+            if (recent) {
+                int alpha = f ? 0xC8 : (dim ? 0x26 : 0x70);
+                tileFill.setColor((alpha << 24) | (base & 0x00FFFFFF));
+                rect.set(0, 0, tileW, tileH);
+                c.drawRoundRect(rect, cornerPx, cornerPx, tileFill);
+                if (f) {
+                    float h = ringPx / 2f;
+                    rect.set(h, h, tileW - h, tileH - h);
+                    c.drawRoundRect(rect, cornerPx, cornerPx, tileRing);
+                }
+                drawIcon(c, w / 2f, tileH / 2f, (int) (iconPx * 0.86f), dim);
+                bottom = tileH;
+            } else {
+                float r = circleD / 2f;
+                float cx = w / 2f;
+                int alpha = f ? 0xFF : (dim ? 0x30 : 0xD0);
+                tileFill.setColor((alpha << 24) | (base & 0x00FFFFFF));
+                c.drawCircle(cx, r, r, tileFill);
+                if (f) c.drawCircle(cx, r, r - ringPx / 2f, tileRing);
+                drawIcon(c, cx, r, iconPx, dim);
+                bottom = circleD;
             }
             if (f) {
-                float h = ringPx / 2f;
-                rect.set(h, h, tileW - h, tileH - h);
-                c.drawRoundRect(rect, cornerPx, cornerPx, tileRing);
-                c.drawText(shownLabel, tileW / 2f, tileH + labelH * 0.72f, tileText);
+                // Nombre de la app seleccionada, en una píldora redondeada.
+                float pw = Math.min(w - dp(4), labelW + dp(22));
+                float ph = dp(22);
+                float left = (w - pw) / 2f;
+                float top = bottom + dp(6);
+                tileFill.setColor(0xFFF1EFF9);
+                rect.set(left, top, left + pw, top + ph);
+                c.drawRoundRect(rect, ph / 2f, ph / 2f, tileFill);
+                c.drawText(shownLabel, w / 2f,
+                        top + ph / 2f - (tileText.descent() + tileText.ascent()) / 2f, tileText);
             }
         }
 
@@ -572,12 +631,45 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** Botón/pestaña de texto enfocable. */
+    /**
+     * Fila horizontal que NO deja que el foco se escape a otra fila al llegar al borde:
+     * izquierda/derecha solo se mueven dentro de la propia fila.
+     */
+    private class RowLayout extends LinearLayout {
+        RowLayout(Context c) {
+            super(c);
+            setOrientation(HORIZONTAL);
+        }
+
+        @Override
+        public View focusSearch(View focused, int direction) {
+            if (direction == View.FOCUS_LEFT || direction == View.FOCUS_RIGHT) {
+                int i = indexOfChild(focused);
+                if (i >= 0) {
+                    int j = direction == View.FOCUS_RIGHT ? i + 1 : i - 1;
+                    return (j >= 0 && j < getChildCount()) ? getChildAt(j) : focused;
+                }
+            }
+            return super.focusSearch(focused, direction);
+        }
+    }
+
+    /** Botón/pestaña de texto enfocable. En modo pestaña, enfocada = píldora blanca con letra oscura. */
     private class FocusTextView extends TextView {
+        boolean tabStyle;
+
         FocusTextView(Context c) {
             super(c);
             setFocusable(true);
             setClickable(true);
+        }
+
+        @Override
+        protected void drawableStateChanged() {
+            super.drawableStateChanged();
+            if (tabStyle) {
+                setTextColor(isFocused() ? TEXT_DARK : (isSelected() ? TEXT_PRIMARY : TEXT_SECONDARY));
+            }
         }
 
         @Override
@@ -1474,11 +1566,48 @@ public class MainActivity extends Activity {
         return g;
     }
 
+    /** Panel que vive DENTRO de la pantalla del launcher (no es una ventana aparte). */
+    private class Panel {
+        final FrameLayout layer = new FrameLayout(MainActivity.this);
+        final List<OptionRow> rows = new ArrayList<>();
+        View prevFocus;
+        boolean shown;
+
+        void show() {
+            if (currentPanel != null) currentPanel.dismiss();
+            prevFocus = getCurrentFocus();
+            currentPanel = this;
+            shown = true;
+            root.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+            screenRoot.addView(layer, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+
+        void dismiss() {
+            if (!shown) return;
+            shown = false;
+            screenRoot.removeView(layer);
+            panelRows.removeAll(rows);
+            root.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+            if (currentPanel == this) currentPanel = null;
+            View pf = prevFocus;
+            if (pf != null && pf.isAttachedToWindow()) pf.requestFocus();
+            else if (firstCardRef != null) firstCardRef.requestFocus();
+        }
+    }
+
     /** Marco del panel: flotante, 16:9 como máximo, con el color del fondo del launcher. */
-    private Dialog panelDialog(String title, View body, int h) {
+    private Panel panelDialog(String title, View body, int h) {
         int[] m = panelMetrics();
-        Dialog d = new Dialog(this);
-        d.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        final Panel p = new Panel();
+
+        View scrim = new View(this);
+        scrim.setBackgroundColor(0xB3000000);
+        scrim.setClickable(true);
+        scrim.setOnClickListener(v -> p.dismiss());
+        p.layer.addView(scrim, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(24), dp(20), dp(24), dp(18));
@@ -1501,17 +1630,8 @@ public class MainActivity extends Activity {
 
         box.addView(body, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-        d.setContentView(box);
-
-        Window w = d.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            w.setLayout(m[0], h);
-            w.setGravity(Gravity.CENTER);
-            w.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            w.setDimAmount(0.7f);
-        }
-        return d;
+        p.layer.addView(box, new FrameLayout.LayoutParams(m[0], h, Gravity.CENTER));
+        return p;
     }
 
     private void showOptions(String title, List<Opt> opts, final PanelCb cb) {
@@ -1529,8 +1649,7 @@ public class MainActivity extends Activity {
         sv.setPadding(dp(4), dp(4), dp(4), dp(4));
         sv.addView(list);
 
-        final Dialog d = panelDialog(title, sv, h);
-        final List<OptionRow> mine = new ArrayList<>();
+        final Panel d = panelDialog(title, sv, h);
         View focusTarget = null;
         for (final Opt o : opts) {
             final OptionRow r = new OptionRow(o);
@@ -1539,7 +1658,7 @@ public class MainActivity extends Activity {
             lp.bottomMargin = o.kind == K_HEADER ? 0 : dp(8);
             list.addView(r, lp);
             panelRows.add(r);
-            mine.add(r);
+            d.rows.add(r);
             if (o.kind == K_HEADER) continue;
             r.setOnClickListener(v -> {
                 if (o.kind != K_TOGGLE) d.dismiss();
@@ -1548,7 +1667,6 @@ public class MainActivity extends Activity {
             if (o.selected) focusTarget = r;
             else if (focusTarget == null) focusTarget = r;
         }
-        d.setOnDismissListener(x -> panelRows.removeAll(mine));
         d.show();
         if (focusTarget != null) focusTarget.requestFocus();
     }
@@ -1574,7 +1692,7 @@ public class MainActivity extends Activity {
         ScrollView sv = new ScrollView(this);
         sv.setVerticalScrollBarEnabled(false);
         sv.addView(col);
-        final Dialog d = panelDialog(title, sv, (int) (m[1] * 0.85f));
+        final Panel d = panelDialog(title, sv, (int) (m[1] * 0.85f));
         OptionRow ok = new OptionRow(action(0, "Entendido"));
         ok.setOnClickListener(v -> d.dismiss());
         col.addView(ok, new LinearLayout.LayoutParams(
@@ -1603,7 +1721,7 @@ public class MainActivity extends Activity {
         ScrollView sv = new ScrollView(this);
         sv.setVerticalScrollBarEnabled(false);
         sv.addView(col);
-        final Dialog d = panelDialog(title, sv, (int) (m[1] * 0.85f));
+        final Panel d = panelDialog(title, sv, (int) (m[1] * 0.85f));
 
         OptionRow save = new OptionRow(action(0, "Guardar"));
         save.setOnClickListener(v -> {
@@ -1627,6 +1745,14 @@ public class MainActivity extends Activity {
         s.addState(new int[]{android.R.attr.state_focused}, shape(0x4DFFFFFF, true, radiusDp));
         s.addState(new int[]{android.R.attr.state_selected}, shape(0x33FFFFFF, false, radiusDp));
         s.addState(new int[]{}, shape(0x00000000, false, radiusDp));
+        return s;
+    }
+
+    private Drawable tabSelector() {
+        StateListDrawable s = new StateListDrawable();
+        s.addState(new int[]{android.R.attr.state_focused}, shape(0xFFEDEAF7, false, 40));
+        s.addState(new int[]{android.R.attr.state_selected}, shape(0x4DFFFFFF, false, 40));
+        s.addState(new int[]{}, shape(0x00000000, false, 40));
         return s;
     }
 
