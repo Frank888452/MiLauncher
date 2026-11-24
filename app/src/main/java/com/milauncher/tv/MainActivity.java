@@ -17,6 +17,8 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
@@ -59,6 +61,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
@@ -80,6 +83,8 @@ public class MainActivity extends Activity {
     private static final String KEY_RECENT = "recent";  // líneas "paquete" (más reciente primero)
     private static final String KEY_HIDDEN = "hidden"; // líneas "paquete"
     private static final String KEY_TIP = "tip_seen";  // ya vio la ayuda de uso
+    private static final String KEY_LABELS = "labels";  // líneas "paquete|fecha|nombre"
+    private static final String KEY_LABELS_LOC = "labels_loc"; // idioma con el que se guardaron
     private static final String KEY_BG = "bg";          // "p0".."p7"
     private static final String KEY_SIZE = "size";      // 0 chico, 1 mediano, 2 grande
     private static final String KEY_DYN = "dyn";        // fondo que se tiñe con la app enfocada
@@ -146,6 +151,8 @@ public class MainActivity extends Activity {
     private List<String> recent = new ArrayList<>();
     private List<String> hidden = new ArrayList<>();
     private final Map<String, String> labelCache = new HashMap<>();
+    private final Map<String, String[]> labelStore = new HashMap<>(); // paquete -> {fecha, nombre}
+    private boolean labelsDirty = false;
 
     private final Map<String, Bitmap> iconCache = new HashMap<>();
     private final Map<String, Integer> tintCache = new HashMap<>();
@@ -159,6 +166,8 @@ public class MainActivity extends Activity {
     private final Paint tileRing = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint tileText = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint iconPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+    private final PorterDuffColorFilter dimFilter =
+            new PorterDuffColorFilter(0x99000000, PorterDuff.Mode.SRC_ATOP);
 
     // Pinturas de los paneles de Ajustes.
     private final TextPaint pOptTitle = new TextPaint(Paint.ANTI_ALIAS_FLAG);
@@ -171,7 +180,7 @@ public class MainActivity extends Activity {
 
     private int sizeIdx = 1;
     private boolean dynBg = true;
-    private int iconPx, tileW, tileH, labelH, cornerPx, ringPx, circleD, circleW;
+    private int iconPx, tileW, tileH, labelH, cornerPx, ringPx, circleD, circleW, ringGap, circleTop;
 
     private Drawable.ConstantState pillState;
     private Drawable.ConstantState tabState;
@@ -194,6 +203,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        loadLabelStore();
         pillState = selectorBackground(40).getConstantState();
         tabState = tabSelector().getConstantState();
         Typeface medium = Typeface.create("sans-serif-medium", Typeface.NORMAL);
@@ -278,6 +288,8 @@ public class MainActivity extends Activity {
         labelH = dp(32);
         cornerPx = dp(12);
         ringPx = Math.max(2, dp(2));
+        ringGap = dp(3);
+        circleTop = ringGap + ringPx;
         tileRing.setStrokeWidth(ringPx);
         tileText.setTextSize(13 * getResources().getDisplayMetrics().scaledDensity);
     }
@@ -565,58 +577,63 @@ public class MainActivity extends Activity {
         @Override
         protected void onMeasure(int widthSpec, int heightSpec) {
             if (recent) setMeasuredDimension(tileW, tileH + labelH);
-            else setMeasuredDimension(circleW, circleD + labelH);
+            else setMeasuredDimension(circleW, circleTop + circleD + labelH);
         }
 
         private void drawIcon(Canvas c, float cx, float cy, int size, boolean dim) {
             if (icon == null) return;
-            iconPaint.setAlpha(dim ? 90 : 255);
+            iconPaint.setAlpha(255);
+            iconPaint.setColorFilter(dim ? dimFilter : null);
             int l = (int) (cx - size / 2f);
             int t = (int) (cy - size / 2f);
             dst.set(l, t, l + size, t + size);
             c.drawBitmap(icon, null, dst, iconPaint);
+            iconPaint.setColorFilter(null);
         }
 
         @Override
         protected void onDraw(Canvas c) {
             boolean f = isFocused();
             boolean dim = tilesDimmed && !f;
-            int base = tint != 0 ? tint : 0xFF3B4663;
+            // Color sólido tomado del contorno del ícono. Las apagadas se oscurecen, sin transparencia.
+            int base = tint != 0 ? (0xFF000000 | tint) : 0xFF3B4663;
+            tileFill.setColor(dim ? blend(base, 0xFF000000, 0.6f) : base);
             int w = getWidth();
-            float bottom;
+            float pillTop;
             if (recent) {
-                int alpha = f ? 0xC8 : (dim ? 0x26 : 0x70);
-                tileFill.setColor((alpha << 24) | (base & 0x00FFFFFF));
                 rect.set(0, 0, tileW, tileH);
                 c.drawRoundRect(rect, cornerPx, cornerPx, tileFill);
                 if (f) {
+                    tileRing.setColor(isLight(base) ? TEXT_DARK : Color.WHITE);
                     float h = ringPx / 2f;
                     rect.set(h, h, tileW - h, tileH - h);
                     c.drawRoundRect(rect, cornerPx, cornerPx, tileRing);
                 }
                 drawIcon(c, w / 2f, tileH / 2f, (int) (iconPx * 0.86f), dim);
-                bottom = tileH;
+                pillTop = tileH + dp(6);
             } else {
                 float r = circleD / 2f;
                 float cx = w / 2f;
-                int alpha = f ? 0xFF : (dim ? 0x30 : 0xD0);
-                tileFill.setColor((alpha << 24) | (base & 0x00FFFFFF));
-                c.drawCircle(cx, r, r, tileFill);
-                if (f) c.drawCircle(cx, r, r - ringPx / 2f, tileRing);
-                drawIcon(c, cx, r, iconPx, dim);
-                bottom = circleD;
+                float cy = circleTop + r;
+                c.drawCircle(cx, cy, r, tileFill);
+                if (f) {
+                    // Aro blanco por fuera del círculo, con un espacio, como en Google TV.
+                    tileRing.setColor(Color.WHITE);
+                    c.drawCircle(cx, cy, r + ringGap + ringPx / 2f, tileRing);
+                }
+                drawIcon(c, cx, cy, iconPx, dim);
+                pillTop = circleTop + circleD + ringGap + ringPx + dp(4);
             }
             if (f) {
                 // Nombre de la app seleccionada, en una píldora redondeada.
                 float pw = Math.min(w - dp(4), labelW + dp(22));
                 float ph = dp(22);
                 float left = (w - pw) / 2f;
-                float top = bottom + dp(6);
                 tileFill.setColor(0xFFF1EFF9);
-                rect.set(left, top, left + pw, top + ph);
+                rect.set(left, pillTop, left + pw, pillTop + ph);
                 c.drawRoundRect(rect, ph / 2f, ph / 2f, tileFill);
                 c.drawText(shownLabel, w / 2f,
-                        top + ph / 2f - (tileText.descent() + tileText.ascent()) / 2f, tileText);
+                        pillTop + ph / 2f - (tileText.descent() + tileText.ascent()) / 2f, tileText);
             }
         }
 
@@ -696,7 +713,7 @@ public class MainActivity extends Activity {
         io.execute(() -> {
             try {
                 final Bitmap b = loadIconBitmap(e, size);
-                final int tint = averageColor(b);
+                final int tint = edgeColor(b);
                 runOnUiThread(() -> {
                     if (size != iconPx) return; // cambió el tamaño mientras cargaba
                     iconCache.put(e.pkg, b);
@@ -809,7 +826,57 @@ public class MainActivity extends Activity {
         }
         if (n == 0) return 0;
         int avg = 0xFF000000 | ((int) (r / n) << 16) | ((int) (g / n) << 8) | (int) (bl / n);
-        return blend(avg, 0xFF222B42, 0.25f);
+        return avg;
+    }
+
+    private boolean isLight(int c) {
+        float lum = 0.299f * ((c >> 16) & 255) + 0.587f * ((c >> 8) & 255) + 0.114f * (c & 255);
+        return lum > 190f;
+    }
+
+    /**
+     * Color del contorno del ícono: desde cada borde se entra hasta el primer píxel opaco
+     * y se toma el color más frecuente de ese contorno (blanco en YouTube, celeste en Prime Video).
+     * Si el ícono no tiene contorno opaco, se usa el color promedio.
+     */
+    private int edgeColor(Bitmap b) {
+        final int n = 16;
+        Bitmap sm = Bitmap.createScaledBitmap(b, n, n, true);
+        int[] px = new int[n * n];
+        sm.getPixels(px, 0, n, 0, 0, n, n);
+        if (sm != b) sm.recycle();
+        Map<Integer, int[]> buckets = new HashMap<>();
+        int[] best = null;
+        for (int i = 0; i < n; i++) {
+            for (int side = 0; side < 4; side++) {
+                int p = 0;
+                boolean found = false;
+                for (int k = 0; k < n && !found; k++) {
+                    switch (side) {
+                        case 0: p = px[i * n + k]; break;               // fila i desde la izquierda
+                        case 1: p = px[i * n + (n - 1 - k)]; break;     // fila i desde la derecha
+                        case 2: p = px[k * n + i]; break;               // columna i desde arriba
+                        default: p = px[(n - 1 - k) * n + i];           // columna i desde abajo
+                    }
+                    if ((p >>> 24) >= 200) found = true;
+                }
+                if (!found) continue;
+                int r = (p >> 16) & 255, g = (p >> 8) & 255, bl = p & 255;
+                int key = ((r >> 4) << 8) | ((g >> 4) << 4) | (bl >> 4);
+                int[] v = buckets.get(key);
+                if (v == null) {
+                    v = new int[4];
+                    buckets.put(key, v);
+                }
+                v[0]++;
+                v[1] += r;
+                v[2] += g;
+                v[3] += bl;
+                if (best == null || v[0] > best[0]) best = v;
+            }
+        }
+        if (best == null) return averageColor(b);
+        return 0xFF000000 | ((best[1] / best[0]) << 16) | ((best[2] / best[0]) << 8) | (best[3] / best[0]);
     }
 
     private int blend(int a, int b, float t) {
@@ -825,6 +892,7 @@ public class MainActivity extends Activity {
         if (!dynBg) color = 0;
         if (color == lastTint) return;
         lastTint = color;
+        if (color != 0 && isLight(color | 0xFF000000)) color = blend(color | 0xFF000000, 0xFF222B42, 0.6f);
         int[] base = BG_COLORS[bgIdx];
         int[] c = new int[2];
         if (color == 0) {
@@ -900,7 +968,46 @@ public class MainActivity extends Activity {
         Map<String, Entry> map = new LinkedHashMap<>();
         collect(pm, map, Intent.CATEGORY_LEANBACK_LAUNCHER);
         collect(pm, map, Intent.CATEGORY_LAUNCHER);
+        int before = labelStore.size();
+        labelStore.keySet().retainAll(map.keySet()); // olvidar apps desinstaladas
+        if (labelStore.size() != before) labelsDirty = true;
+        if (labelsDirty) saveLabelStore();
         return map;
+    }
+
+    /** Fecha del archivo de la app: si cambia (actualización), se vuelve a leer el nombre. */
+    private long stampOf(ResolveInfo ri) {
+        String dir = ri.activityInfo.applicationInfo.sourceDir;
+        return dir != null ? new File(dir).lastModified() : 0;
+    }
+
+    private void loadLabelStore() {
+        labelStore.clear();
+        String loc = Locale.getDefault().toString();
+        if (!loc.equals(prefs.getString(KEY_LABELS_LOC, ""))) {
+            // Cambió el idioma del sistema: los nombres guardados ya no sirven.
+            labelsDirty = true;
+            return;
+        }
+        for (String line : readLines(KEY_LABELS)) {
+            int a = line.indexOf('|');
+            int b = a < 0 ? -1 : line.indexOf('|', a + 1);
+            if (a > 0 && b > a) {
+                labelStore.put(line.substring(0, a),
+                        new String[]{line.substring(a + 1, b), line.substring(b + 1)});
+            }
+        }
+    }
+
+    private void saveLabelStore() {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String[]> en : labelStore.entrySet()) {
+            sb.append(en.getKey()).append('|').append(en.getValue()[0]).append('|')
+                    .append(en.getValue()[1]).append('\n');
+        }
+        prefs.edit().putString(KEY_LABELS, sb.toString())
+                .putString(KEY_LABELS_LOC, Locale.getDefault().toString()).apply();
+        labelsDirty = false;
     }
 
     private void collect(PackageManager pm, Map<String, Entry> map, String category) {
@@ -914,7 +1021,15 @@ public class MainActivity extends Activity {
             e.cn = new ComponentName(pkg, ri.activityInfo.name);
             String label = labelCache.get(pkg);
             if (label == null) {
-                label = String.valueOf(ri.loadLabel(pm)); // solo la primera vez
+                String stamp = String.valueOf(stampOf(ri));
+                String[] st = labelStore.get(pkg);
+                if (st != null && st[0].equals(stamp)) {
+                    label = st[1]; // guardado: no hace falta abrir el APK de la app
+                } else {
+                    label = String.valueOf(ri.loadLabel(pm)).replace('\n', ' ');
+                    labelStore.put(pkg, new String[]{stamp, label});
+                    labelsDirty = true;
+                }
                 labelCache.put(pkg, label);
             }
             e.label = label;
@@ -1477,6 +1592,7 @@ public class MainActivity extends Activity {
                 return;
             }
             boolean f = isFocused();
+            tileRing.setColor(Color.WHITE);
             float r14 = dp(14);
             tileFill.setColor(f ? 0x40FFFFFF : 0x14FFFFFF);
             rect.set(0, 0, w, h);
@@ -1508,6 +1624,7 @@ public class MainActivity extends Activity {
                     int top = (int) (cy - s / 2f);
                     dst.set(left, top, left + s, top + s);
                     iconPaint.setAlpha(255);
+                    iconPaint.setColorFilter(null);
                     c.drawBitmap(icon, null, dst, iconPaint);
                 }
                 x += dp(58);
