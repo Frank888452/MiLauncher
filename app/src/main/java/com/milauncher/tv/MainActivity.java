@@ -1,5 +1,6 @@
 package com.milauncher.tv;
 
+import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.Dialog;
 import android.content.ComponentName;
@@ -185,6 +186,8 @@ public class MainActivity extends Activity {
     private Drawable.ConstantState pillState;
     private Drawable.ConstantState tabState;
     private GradientDrawable bgGradient;
+    private int[] curBg;
+    private ValueAnimator bgAnim;
     private int bgIdx = 0;
     private int lastTint = 0;
 
@@ -918,23 +921,39 @@ public class MainActivity extends Activity {
         return 0xFF000000 | (r << 16) | (g << 8) | bl;
     }
 
-    /** Tiñe suavemente el degradado de fondo con el color de la app enfocada (0 = sin tinte). */
+    /**
+     * Tiñe el fondo con el color de la app enfocada (0 = sin tinte), de a poco:
+     * el tinte es suave, se concentra hacia abajo (donde están las apps) y el cambio
+     * de color es una transición corta, no un salto.
+     */
     private void tintBackground(int color) {
         if (bgGradient == null) return;
         if (!dynBg) color = 0;
         if (color == lastTint) return;
         lastTint = color;
-        if (color != 0 && isLight(color | 0xFF000000)) color = blend(color | 0xFF000000, 0xFF222B42, 0.6f);
         int[] base = BG_COLORS[bgIdx];
-        int[] c = new int[2];
+        final int t0, t1;
         if (color == 0) {
-            c[0] = base[0];
-            c[1] = base[1];
+            t0 = base[0];
+            t1 = base[1];
         } else {
-            c[0] = blend(base[0], color, 0.14f);
-            c[1] = blend(base[1], color, 0.30f);
+            int c = color | 0xFF000000;
+            // Apagar un poco el color; si es muy claro (blanco de YouTube), apagarlo más.
+            c = blend(c, 0xFF222B42, isLight(c) ? 0.6f : 0.3f);
+            t0 = blend(base[0], c, 0.04f);
+            t1 = blend(base[1], c, 0.20f);
         }
-        bgGradient.setColors(c);
+        if (bgAnim != null) bgAnim.cancel();
+        final int[] from = curBg != null ? curBg.clone() : base.clone();
+        bgAnim = ValueAnimator.ofFloat(0f, 1f);
+        bgAnim.setDuration(180);
+        bgAnim.addUpdateListener(a -> {
+            float f = (Float) a.getAnimatedValue();
+            int[] cur = {blend(from[0], t0, f), blend(from[1], t1, f)};
+            curBg = cur;
+            bgGradient.setColors(cur);
+        });
+        bgAnim.start();
     }
 
     // ---------- Datos ----------
@@ -1428,6 +1447,8 @@ public class MainActivity extends Activity {
         bgGradient = new GradientDrawable(GradientDrawable.Orientation.TL_BR, BG_COLORS[idx].clone());
         root.setBackground(bgGradient);
         lastTint = 0;
+        curBg = BG_COLORS[idx].clone();
+        if (bgAnim != null) bgAnim.cancel();
     }
 
     // ---------- Red ----------
