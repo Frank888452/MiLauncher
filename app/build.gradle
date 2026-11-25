@@ -10,8 +10,8 @@ android {
         applicationId 'com.milauncher.tv'
         minSdk 21
         targetSdk 28
-        versionCode 10
-        versionName '10.0'
+        versionCode 11
+        versionName '11.0'
     }
 
     // Firma fija: así cada versión nueva se instala encima de la anterior sin desinstalar.

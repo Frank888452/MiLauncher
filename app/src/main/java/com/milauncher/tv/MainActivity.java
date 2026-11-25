@@ -179,12 +179,14 @@ public class MainActivity extends Activity {
     private boolean tilesDimmed = false;
 
     private int sizeIdx = 1;
+    private boolean dynBg = true;
     private int iconPx, tileW, tileH, labelH, cornerPx, ringPx, circleD, circleW, ringGap, circleTop;
 
     private Drawable.ConstantState pillState;
     private Drawable.ConstantState tabState;
     private GradientDrawable bgGradient;
     private int bgIdx = 0;
+    private int lastTint = 0;
 
     private String currentTabId = "";
     private String signature = "";
@@ -277,6 +279,7 @@ public class MainActivity extends Activity {
 
     private void applyMetrics() {
         sizeIdx = Math.max(0, Math.min(2, prefs.getInt(KEY_SIZE, 1)));
+        dynBg = prefs.getBoolean(KEY_DYN, true);
         tileW = dp(TILE_DP[sizeIdx]);
         tileH = tileW * 9 / 16;
         circleD = (int) (tileH * 1.1f);
@@ -285,7 +288,7 @@ public class MainActivity extends Activity {
         labelH = dp(32);
         cornerPx = dp(12);
         ringPx = Math.max(2, dp(2));
-        ringGap = dp(4);
+        ringGap = dp(3);
         circleTop = ringGap + ringPx;
         tileRing.setStrokeWidth(ringPx);
         tileText.setTextSize(13 * getResources().getDisplayMetrics().scaledDensity);
@@ -622,11 +625,10 @@ public class MainActivity extends Activity {
             boolean dim = tilesDimmed && !f;
             // Color sólido tomado del contorno del ícono. Las apagadas se oscurecen, sin transparencia.
             int base = tint != 0 ? (0xFF000000 | tint) : 0xFF3B4663;
+            tileFill.setColor(dim ? blend(base, 0xFF000000, 0.6f) : base);
             int w = getWidth();
             float pillTop;
-            int fill = dim ? blend(base, 0xFF000000, 0.6f) : base;
             if (recent) {
-                tileFill.setColor(fill);
                 rect.set(0, 0, tileW, tileH);
                 c.drawRoundRect(rect, cornerPx, cornerPx, tileFill);
                 if (f) {
@@ -641,15 +643,9 @@ public class MainActivity extends Activity {
                 float r = circleD / 2f;
                 float cx = w / 2f;
                 float cy = circleTop + r;
-                if (f) {
-                    // Banda del color del ícono alrededor del círculo (sólida, más oscura).
-                    tileFill.setColor(blend(base, 0xFF000000, 0.55f));
-                    c.drawCircle(cx, cy, r + ringGap, tileFill);
-                }
-                tileFill.setColor(fill);
                 c.drawCircle(cx, cy, r, tileFill);
                 if (f) {
-                    // Aro blanco por fuera, como en Google TV.
+                    // Aro blanco por fuera del círculo, con un espacio, como en Google TV.
                     tileRing.setColor(Color.WHITE);
                     c.drawCircle(cx, cy, r + ringGap + ringPx / 2f, tileRing);
                 }
@@ -672,7 +668,10 @@ public class MainActivity extends Activity {
         @Override
         protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
             super.onFocusChanged(gain, direction, previouslyFocusedRect);
-            if (gain) setTilesDimmed(true);
+            if (gain) {
+                setTilesDimmed(true);
+                tintBackground(tint);
+            }
             invalidate();
         }
     }
@@ -725,7 +724,10 @@ public class MainActivity extends Activity {
         @Override
         protected void onFocusChanged(boolean gain, int direction, Rect previouslyFocusedRect) {
             super.onFocusChanged(gain, direction, previouslyFocusedRect);
-            if (gain) setTilesDimmed(false);
+            if (gain) {
+                setTilesDimmed(false);
+                tintBackground(0);
+            }
         }
     }
 
@@ -759,6 +761,10 @@ public class MainActivity extends Activity {
                             t.icon = b;
                             t.tint = tint;
                             t.invalidate();
+                            if (t.isFocused()) {
+                                lastTint = -1;
+                                tintBackground(tint);
+                            }
                         }
                     }
                 });
@@ -910,6 +916,25 @@ public class MainActivity extends Activity {
         int g = (int) (((a >> 8) & 255) * (1 - t) + ((b >> 8) & 255) * t);
         int bl = (int) ((a & 255) * (1 - t) + (b & 255) * t);
         return 0xFF000000 | (r << 16) | (g << 8) | bl;
+    }
+
+    /** Tiñe suavemente el degradado de fondo con el color de la app enfocada (0 = sin tinte). */
+    private void tintBackground(int color) {
+        if (bgGradient == null) return;
+        if (!dynBg) color = 0;
+        if (color == lastTint) return;
+        lastTint = color;
+        if (color != 0 && isLight(color | 0xFF000000)) color = blend(color | 0xFF000000, 0xFF222B42, 0.6f);
+        int[] base = BG_COLORS[bgIdx];
+        int[] c = new int[2];
+        if (color == 0) {
+            c[0] = base[0];
+            c[1] = base[1];
+        } else {
+            c[0] = blend(base[0], color, 0.14f);
+            c[1] = blend(base[1], color, 0.30f);
+        }
+        bgGradient.setColors(c);
     }
 
     // ---------- Datos ----------
@@ -1233,7 +1258,7 @@ public class MainActivity extends Activity {
     // ---------- Ajustes ----------
 
     private static final int ID_NEWCAT = 1, ID_RENAME = 2, ID_MOVECAT = 3, ID_DELCAT = 4,
-            ID_SIZE = 5, ID_BG = 6, ID_HIDDEN = 8, ID_HELP = 9, ID_ANDROID = 10;
+            ID_SIZE = 5, ID_BG = 6, ID_DYN = 7, ID_HIDDEN = 8, ID_HELP = 9, ID_ANDROID = 10;
 
     private void showSettingsMenu() {
         Map<String, Entry> inst = queryInstalled();
@@ -1249,6 +1274,7 @@ public class MainActivity extends Activity {
         o.add(header("Apariencia"));
         o.add(valueOpt(ID_SIZE, "Tamaño de tarjetas", SIZE_NAMES[sizeIdx]));
         o.add(valueOpt(ID_BG, "Fondo", BG_NAMES[bgIdx]));
+        o.add(toggleOpt(ID_DYN, "Fondo que cambia con la app", dynBg));
         o.add(header("Apps"));
         o.add(valueOpt(ID_HIDDEN, "Apps ocultas", String.valueOf(hiddenCount)));
         o.add(header("Ayuda"));
@@ -1292,6 +1318,13 @@ public class MainActivity extends Activity {
                 }
                 case ID_BG:
                     showBackgroundMenu();
+                    break;
+                case ID_DYN:
+                    dynBg = !dynBg;
+                    prefs.edit().putBoolean(KEY_DYN, dynBg).apply();
+                    lastTint = -1;
+                    tintBackground(0);
+                    if (row != null) row.toggle();
                     break;
                 case ID_HIDDEN:
                     showHiddenApps();
@@ -1394,6 +1427,7 @@ public class MainActivity extends Activity {
         bgIdx = idx;
         bgGradient = new GradientDrawable(GradientDrawable.Orientation.TL_BR, BG_COLORS[idx].clone());
         root.setBackground(bgGradient);
+        lastTint = 0;
     }
 
     // ---------- Red ----------
