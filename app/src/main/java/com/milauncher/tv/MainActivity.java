@@ -67,6 +67,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Mi Launcher v4 (estilo Google TV, liviano)
@@ -161,6 +163,8 @@ public class MainActivity extends Activity {
     private final Map<String, View> tabViews = new HashMap<>();
     private final Set<String> loading = new HashSet<>();
     private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final AtomicInteger pendingIcons = new AtomicInteger();
+    private final AtomicBoolean heavyLoad = new AtomicBoolean();
 
     // Pinturas compartidas por todas las tarjetas.
     private final Paint tileFill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -745,6 +749,7 @@ public class MainActivity extends Activity {
 
     private void loadIconAsync(final Entry e) {
         final int size = iconPx;
+        pendingIcons.incrementAndGet();
         io.execute(() -> {
             try {
                 final Bitmap b = loadIconBitmap(e, size);
@@ -773,14 +778,16 @@ public class MainActivity extends Activity {
                 });
             } catch (Throwable ignored) {
                 // Si un ícono falla, la tarjeta queda sin ícono pero con nombre.
+            } finally {
+                // Al terminar una tanda que tuvo que leer apps del sistema, soltar esos recursos ya.
+                if (pendingIcons.decrementAndGet() == 0 && heavyLoad.getAndSet(false)) System.gc();
             }
         });
     }
 
     /**
-     * Devuelve el ícono ya achicado al tamaño exacto. Primero mira la carpeta de caché
-     * (archivitos de unos KB); si no está, lo pide al sistema en baja resolución,
-     * lo achica una sola vez y lo guarda para la próxima.
+     * Devuelve el ícono al tamaño exacto. Primero mira la carpeta de caché (un archivito por app);
+     * si no está, lo pide al sistema en baja resolución y lo guarda como maestro para la próxima.
      */
     private Bitmap loadIconBitmap(Entry e, int size) {
         PackageManager pm = getPackageManager();
@@ -789,21 +796,38 @@ public class MainActivity extends Activity {
             stamp = pm.getPackageInfo(e.pkg, 0).lastUpdateTime; // si la app se actualiza, se regenera
         } catch (Exception ignored) {
         }
+        // Un solo archivo "maestro" por app, al tamaño más grande. Cambiar el tamaño de las tarjetas
+        // solo lo reescala: no vuelve a abrir ninguna app del sistema.
+        int master = Math.max(size, masterPx());
         File dir = new File(getCacheDir(), "icons");
-        File f = new File(dir, e.pkg + "__" + size + "__" + stamp + ".png");
+        File f = new File(dir, e.pkg + "__m" + master + "__" + stamp + ".png");
+        Bitmap m = null;
         if (f.exists()) {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inScaled = false;
-            Bitmap cached = BitmapFactory.decodeFile(f.getAbsolutePath(), o);
-            if (cached != null) return cached;
+            m = BitmapFactory.decodeFile(f.getAbsolutePath(), o);
         }
-        Drawable d = lowResIcon(pm, e.cn, size);
-        Bitmap b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-        Canvas cv = new Canvas(b);
-        d.setBounds(0, 0, size, size);
-        d.draw(cv);
-        saveIcon(dir, f, e.pkg, b);
-        return b;
+        if (m == null) {
+            Drawable d = lowResIcon(pm, e.cn, master);
+            m = Bitmap.createBitmap(master, master, Bitmap.Config.ARGB_8888);
+            Canvas cv = new Canvas(m);
+            d.setBounds(0, 0, master, master);
+            d.draw(cv);
+            saveIcon(dir, f, e.pkg, m);
+            heavyLoad.set(true);
+        }
+        if (m.getWidth() == size) return m;
+        Bitmap out = Bitmap.createScaledBitmap(m, size, size, true);
+        if (out != m) m.recycle();
+        return out;
+    }
+
+    /** Tamaño del ícono de la opción "Grande": es el tamaño del archivo maestro. */
+    private int masterPx() {
+        int w = dp(TILE_DP[2]);
+        int h = w * 9 / 16;
+        int d = (int) (h * 1.1f);
+        return (int) (d * 0.62f);
     }
 
     /** Pide el ícono con una densidad parecida al tamaño que necesitamos, y no la más grande. */
