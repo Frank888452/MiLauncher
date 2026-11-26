@@ -162,7 +162,11 @@ public class MainActivity extends Activity {
     private final List<TileView> allTiles = new ArrayList<>();
     private final Map<String, View> tabViews = new HashMap<>();
     private final Set<String> loading = new HashSet<>();
-    private final ExecutorService io = Executors.newSingleThreadExecutor();
+    private final ExecutorService io = Executors.newSingleThreadExecutor(r -> new Thread(() -> {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
+        r.run();
+    }, "iconos"));
+    private int heavyInBatch = 0; // solo se toca desde el hilo de carga
     private final AtomicInteger pendingIcons = new AtomicInteger();
     private final AtomicBoolean heavyLoad = new AtomicBoolean();
 
@@ -780,7 +784,7 @@ public class MainActivity extends Activity {
                 // Si un ícono falla, la tarjeta queda sin ícono pero con nombre.
             } finally {
                 // Al terminar una tanda que tuvo que leer apps del sistema, soltar esos recursos ya.
-                if (pendingIcons.decrementAndGet() == 0 && heavyLoad.getAndSet(false)) System.gc();
+                if (pendingIcons.decrementAndGet() == 0 && heavyLoad.getAndSet(false)) releaseSystemResources();
             }
         });
     }
@@ -815,11 +819,22 @@ public class MainActivity extends Activity {
             d.draw(cv);
             saveIcon(dir, f, e.pkg, m);
             heavyLoad.set(true);
+            // Nunca más de ~8 apps abiertas a la vez: se suelta lo leído antes de seguir.
+            if (++heavyInBatch >= 8) {
+                heavyInBatch = 0;
+                releaseSystemResources();
+            }
         }
         if (m.getWidth() == size) return m;
         Bitmap out = Bitmap.createScaledBitmap(m, size, size, true);
         if (out != m) m.recycle();
         return out;
+    }
+
+    /** Libera los recursos de las apps que se abrieron para sacar íconos (se llama desde el hilo de carga). */
+    private void releaseSystemResources() {
+        System.gc();
+        System.runFinalization();
     }
 
     /** Tamaño del ícono de la opción "Grande": es el tamaño del archivo maestro. */
